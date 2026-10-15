@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="pl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TRIKI Arcade</title><meta name="theme-color" content="#14121c">
+<style>
+:root{--bg:#14121c;--card:#1f1b2e;--fg:#f4f1ff;--mut:#9a93b8;--pk:#ff2bd6;--gr:#3dffb0;color-scheme:dark}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;padding:12px;min-height:100vh}
+h1{margin:4px 0 8px;font-size:24px;letter-spacing:1px}h1 span{color:var(--pk)}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center;margin-bottom:8px}
+button{background:var(--pk);color:#fff;border:0;border-radius:10px;padding:9px 14px;font-weight:700;font-size:15px;cursor:pointer}
+button.g{background:var(--card);color:var(--fg)}
+.pill{padding:5px 11px;border-radius:99px;background:var(--card);font-size:13px;color:var(--mut)}.pill.on{color:var(--gr)}
+#menu{display:grid;grid-template-columns:1fr 1fr;gap:10px;width:min(420px,100%)}
+.card{background:var(--card);border:2px solid transparent;border-radius:14px;padding:14px;cursor:pointer}
+.card.sel{border-color:var(--pk)}.card b{display:block;font-size:18px;margin-bottom:4px}
+.card small{color:var(--mut);display:block;min-height:34px}.card em{color:var(--gr);font-style:normal;font-size:13px}
+#cv{width:min(420px,100%);aspect-ratio:3/4;background:#0d0b14;border-radius:14px;display:none}
+#hint{color:var(--mut);font-size:14px;margin:8px 0;text-align:center;min-height:20px}
+details{width:min(420px,100%);background:var(--card);border-radius:12px;padding:10px 14px;margin-top:10px;font-size:14px}
+summary{cursor:pointer;color:var(--mut)}label{display:flex;justify-content:space-between;gap:10px;margin:8px 0;align-items:center}
+input[type=range]{width:55%}#dbg{font:11px monospace;color:var(--mut);word-break:break-all;margin-top:8px}
+</style></head><body>
+<h1>TRIKI <span>ARCADE</span></h1>
+<div class="bar"><button id="bc">Połącz z Triki</button><span class="pill" id="st">niepołączone</span><button class="g" id="bm" style="display:none">Menu</button></div>
+<div id="menu"></div>
+<canvas id="cv" width="360" height="480"></canvas>
+<div id="hint"></div>
+<details><summary>Ustawienia i diagnostyka</summary>
+<label>Czułość kręcenia <input type="range" id="s1" min="1" max="10" value="5"></label>
+<label>Czułość pochylenia <input type="range" id="s2" min="1" max="10" value="5"></label>
+<label>Czułość stuknięcia <input type="range" id="s3" min="1" max="10" value="5"></label>
+<label>Odwróć kierunek kręcenia <input type="checkbox" id="inv"></label>
+<button class="g" id="rs">Zeruj rekordy</button>
+<div id="dbg">Bez Triki możesz grać z klawiatury: ←/→ kręcenie, ↑/↓ pochylenie, spacja stuknięcie, F odwrócenie, Esc menu.</div>
+</details>
+<script>
+const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e',RXU='6e400002-b5a3-f393-e0a9-e50e24dcca9e',TXU='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const $=s=>document.querySelector(s),clamp=(x,a,b)=>Math.max(a,Math.min(b,x)),rnd=(a,b)=>a+Math.random()*(b-a);
+const cfg={twist:4000,tilt:50,tap:1200,inv:false};
+const IN={turn:0,tilt:0,flip:false,tap:false};
+/* ---------- Triki: Bluetooth + dekodowanie ruchu ---------- */
+let off=null,cal={n:0,sc:{}},bias=[0,0,0],nb=0,aM=2050,lastTap=0,raw='',dev=null;
+const rd=(dv,o,l)=>Array.from({length:6},(_,i)=>dv.getInt16(o+i*2,l));
+function onPkt(dv){
+  const n=dv.byteLength;if(n<12)return;
+  raw=Array.from(new Uint8Array(dv.buffer,dv.byteOffset,n),b=>b.toString(16).padStart(2,'0')).join(' ');
+  if(!off){ // autodetekcja układu pakietu: w spoczynku płasko a≈(24,0,-2050), żyro≈0
+    for(let o=0;o<=n-12;o++)for(const l of[1,0]){const v=rd(dv,o,!!l),k=o+':'+l;
+      cal.sc[k]=(cal.sc[k]||0)+Math.abs(v[5]+2050)+Math.abs(v[4])+Math.abs(v[3])+Math.abs(v[0])+Math.abs(v[1])+Math.abs(v[2]);}
+    if(++cal.n>=30){const k=Object.keys(cal.sc).sort((a,b)=>cal.sc[a]-cal.sc[b])[0].split(':');off={o:+k[0],l:k[1]=='1'};$('#st').textContent='połączone ✓';}
+    return;
+  }
+  const v=rd(dv,off.o,off.l),g=v.slice(0,3),a=v.slice(3),am=Math.hypot(...a)||1;
+  if(nb<150||Math.hypot(g[0]-bias[0],g[1]-bias[1],g[2]-bias[2])<150){const r=nb<150?.05:.003;for(let i=0;i<3;i++)bias[i]+=(g[i]-bias[i])*r;}nb++;
+  const gc=g.map((x,i)=>x-bias[i]),rate=(gc[0]*a[0]+gc[1]*a[1]+gc[2]*a[2])/am; // obrót wokół osi grawitacji = niezależny od ułożenia
+  let t=clamp((cfg.inv?rate:-rate)/cfg.twist,-1,1);if(Math.abs(t)<.12)t=0;
+  IN.turn+=(t-IN.turn)*.5;
+  IN.tilt=clamp(Math.acos(Math.min(1,Math.abs(a[2])/am))*57.3/cfg.tilt,0,1);
+  IN.flip=a[2]/am>.7;
+  aM+=(am-aM)*.05;const now=performance.now();
+  if(Math.abs(am-aM)>cfg.tap&&now-lastTap>250){IN.tap=true;lastTap=now;}
+}
+const NAT=!!(window.Capacitor&&Capacitor.isNativePlatform&&Capacitor.isNativePlatform());
+const CMD=[0x20,0x10,0x00,0xd0,0x07,0x34,0x00,0x03];
+const hex2dv=h=>new DataView(new Uint8Array(h.replace(/[^0-9a-fA-F]/g,'').match(/../g).map(x=>parseInt(x,16))).buffer);
+const disc=()=>{$('#st').textContent='rozłączone';$('#st').classList.remove('on');IN.turn=IN.tilt=0};
+async function connect(){
+  try{
+    off=null;cal={n:0,sc:{}};nb=0;$('#st').textContent='szukam Triki…';
+    if(NAT){
+      const B=Capacitor.Plugins.BluetoothLe;
+      await B.initialize({androidNeverForLocation:true});
+      const r=await B.requestDevice({namePrefix:'Triki',optionalServices:[NUS]});
+      const id=(r.device||r).deviceId;
+      await B.addListener('disconnected|'+id,disc);
+      await B.connect({deviceId:id});
+      await B.addListener(`notification|${id}|${NUS}|${TXU}`,e=>onPkt(hex2dv(e.value)));
+      await B.startNotifications({deviceId:id,service:NUS,characteristic:TXU});
+      await B.write({deviceId:id,service:NUS,characteristic:RXU,value:CMD.map(b=>b.toString(16).padStart(2,'0')).join(' ')});
+    }else{
+      dev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'Triki'},{services:[NUS]}],optionalServices:[NUS]});
+      dev.addEventListener('gattserverdisconnected',disc);
+      const sv=await(await dev.gatt.connect()).getPrimaryService(NUS);
+      const tx=await sv.getCharacteristic(TXU),rx=await sv.getCharacteristic(RXU);
+      tx.addEventListener('characteristicvaluechanged',e=>onPkt(e.target.value));
+      await tx.startNotifications();
+      try{await rx.writeValue(new Uint8Array(CMD))}catch{await rx.writeValueWithoutResponse(new Uint8Array(CMD))}
+    }
+    $('#st').textContent='kalibracja – połóż Triki płasko…';$('#st').classList.add('on');
+  }catch(e){$('#st').textContent='błąd: '+(e.message||JSON.stringify(e));}
+}
+$('#bc').onclick=connect;
+/* ---------- Wejście (Triki + klawiatura) ---------- */
+const KB={l:0,r:0,u:0,d:0,f:0};let kt=0;
+addEventListener('keydown',e=>{const k=e.key;
+  if(k=='ArrowLeft')KB.l=1;if(k=='ArrowRight')KB.r=1;if(k=='ArrowUp')KB.u=1;if(k=='ArrowDown')KB.d=1;if(k=='f'||k=='F')KB.f=1;
+  if(k==' '&&!e.repeat){IN.tap=true;e.preventDefault()}if(k=='Escape')toMenu();if(k.startsWith('Arrow'))e.preventDefault();});
+addEventListener('keyup',e=>{const k=e.key;
+  if(k=='ArrowLeft')KB.l=0;if(k=='ArrowRight')KB.r=0;if(k=='ArrowUp')KB.u=0;if(k=='ArrowDown')KB.d=0;if(k=='f'||k=='F')KB.f=0;});
+function inp(dt){kt=clamp(kt+(KB.u-KB.d||-1)*1.4*dt*(KB.u||KB.d?1:.7),0,1);
+  const r={turn:(KB.r-KB.l)||IN.turn,tilt:Math.max(kt,IN.tilt),flip:!!KB.f||IN.flip,tap:IN.tap};IN.tap=false;return r;}
+/* ---------- Minigry ---------- */
+const adiff=(a,b)=>Math.abs(Math.atan2(Math.sin(a-b),Math.cos(a-b)));
+const GAMES=[
+{id:'tur',name:'Wieżyczka',desc:'Kręć Triki, żeby celować. Stuknij, żeby strzelić w cel zanim zniknie.',hint:'Kręć = celuj · Stuknij = strzał',
+ init:()=>({a:0,t:[],sp:.5,lives:3,score:0,fl:0}),
+ up(s,dt,i){s.a+=i.turn*4*dt;s.sp-=dt;s.fl-=dt;
+  if(s.sp<=0){s.t.push({a:rnd(0,6.283),l:2.8-Math.min(1.4,s.score*.04),m:2.8-Math.min(1.4,s.score*.04)});s.sp=1.1-Math.min(.5,s.score*.02)}
+  s.t.forEach(o=>o.l-=dt);
+  if(i.tap){const h=s.t.findIndex(o=>adiff(o.a,s.a)<.2);if(h>=0){s.t.splice(h,1);s.score++;s.fl=.12}}
+  const n=s.t.length;s.t=s.t.filter(o=>o.l>0);s.lives-=n-s.t.length;return s.lives<=0},
+ dr(s,c){c.strokeStyle='#2e2848';c.lineWidth=2;c.beginPath();c.arc(180,260,130,0,7);c.stroke();
+  s.t.forEach(o=>{c.fillStyle=`hsl(${o.l/o.m*120},90%,60%)`;c.beginPath();c.arc(180+130*Math.cos(o.a),260+130*Math.sin(o.a),8+14*o.l/o.m,0,7);c.fill()});
+  c.strokeStyle=s.fl>0?'#fff':'#ff2bd6';c.lineWidth=6;c.lineCap='round';c.beginPath();c.moveTo(180,260);c.lineTo(180+150*Math.cos(s.a),260+150*Math.sin(s.a));c.stroke();
+  c.fillStyle='#ff2bd6';c.beginPath();c.arc(180,260,14,0,7);c.fill();hud(c,s.score,'♥'.repeat(s.lives))}},
+{id:'bal',name:'Pochył',desc:'Pochylaj Triki, by utrzymać znacznik w ruchomym pasie. Im dłużej, tym węższy pas.',hint:'Pochylenie = wysokość znacznika',
+ init:()=>({p:0,ph:0,c:.5,w:.3,e:1,score:0}),
+ up(s,dt,i){s.ph+=dt*(.8+s.score*.004);s.c=.5+.34*Math.sin(s.ph)*Math.cos(s.ph*.43);s.w=Math.max(.13,.3-s.score*.0012);
+  s.p+=(i.tilt-s.p)*Math.min(1,dt*10);
+  if(Math.abs(s.p-s.c)<s.w/2){s.score+=dt*10;s.e=Math.min(1,s.e+dt*.3)}else s.e-=dt*.45;return s.e<=0},
+ dr(s,c){const y=v=>430-v*340;c.fillStyle='#1f1b2e';c.fillRect(140,80,80,360);
+  c.fillStyle='rgba(61,255,176,.35)';c.fillRect(140,y(s.c+s.w/2),80,s.w*340);
+  c.fillStyle='#ff2bd6';c.beginPath();c.arc(180,y(s.p),16,0,7);c.fill();
+  c.fillStyle='#2e2848';c.fillRect(260,80,14,360);c.fillStyle=s.e>.3?'#3dffb0':'#ff5470';c.fillRect(260,440-360*s.e,14,360*s.e);
+  hud(c,s.score|0,'energia →')}},
+{id:'sla',name:'Slalom',desc:'Kręć Triki, by sterować statkiem w lewo i prawo i unikać spadających bloków.',hint:'Kręć = lewo / prawo',
+ init:()=>({x:180,o:[],sp:0,t:0}),
+ up(s,dt,i){s.t+=dt;s.x=clamp(s.x+i.turn*280*dt,20,340);s.sp-=dt;
+  if(s.sp<=0){s.o.push({x:rnd(10,300),y:-30,w:rnd(35,75)});s.sp=Math.max(.3,.85-s.t*.008)}
+  const v=150+s.t*5;s.o.forEach(o=>o.y+=v*dt);s.o=s.o.filter(o=>o.y<500);
+  return s.o.some(o=>o.y>405&&o.y<445&&s.x>o.x-10&&s.x<o.x+o.w+10)},
+ dr(s,c){c.fillStyle='#ff5470';s.o.forEach(o=>c.fillRect(o.x,o.y,o.w,24));
+  c.fillStyle='#3dffb0';c.beginPath();c.moveTo(s.x,415);c.lineTo(s.x+14,445);c.lineTo(s.x-14,445);c.fill();hud(c,s.t*10|0,'')},
+ score:s=>s.t*10|0},
+{id:'ref',name:'Refleks',desc:'8 rund. Czekaj na sygnał i wykonaj ruch: stuknij, odwróć albo pochyl. Fałstart = 0 pkt.',hint:'Stuknij / Odwróć / Pochyl – zależnie od sygnału',
+ init:()=>({r:0,ph:'w',t:rnd(1,3),cue:0,el:0,score:0,msg:'Czekaj…',pf:0,pt:0}),
+ up(s,dt,i){const a={tap:i.tap,flip:i.flip&&!s.pf,tilt:i.tilt>.6&&!s.pt},any=a.tap||a.flip||a.tilt;s.pf=i.flip;s.pt=i.tilt>.6;
+  const res=m=>{s.msg=m;s.ph='r';s.t=1.1};
+  if(s.ph=='w'){s.t-=dt;if(any)res('Za wcześnie! 0 pkt');else if(s.t<=0){s.ph='g';s.cue=['tap','flip','tilt'][rnd(0,3)|0];s.el=0}}
+  else if(s.ph=='g'){s.el+=dt;if(a[s.cue]){const p=Math.round(Math.max(0,1000-s.el*1000)/10);s.score+=p;res((s.el*1000|0)+' ms  +'+p)}
+   else if(any)res('Zły ruch! 0 pkt');else if(s.el>2)res('Za wolno! 0 pkt')}
+  else{s.t-=dt;if(s.t<=0){if(++s.r>=8)return 1;s.ph='w';s.t=rnd(1,3);s.msg='Czekaj…'}}return 0},
+ dr(s,c){const go=s.ph=='g';c.fillStyle=go?'#3dffb0':'#1f1b2e';c.fillRect(30,150,300,180);
+  c.fillStyle=go?'#0d0b14':'#f4f1ff';c.textAlign='center';c.font='bold 38px system-ui';
+  c.fillText(go?{tap:'STUKNIJ!',flip:'ODWRÓĆ!',tilt:'POCHYL!'}[s.cue]:s.msg.split('  ')[0],180,252);
+  if(s.ph=='r'&&s.msg.includes('  ')){c.font='20px system-ui';c.fillText(s.msg.split('  ')[1],180,295)}
+  c.textAlign='left';hud(c,s.score,'runda '+Math.min(8,s.r+1)+'/8')}},
+{id:'cym',name:'Cymbergaj',desc:'Kręć = paletka w bok, pochyl = do przodu. Wbij krążek do bramki rywala, nie wpuść 3 goli.',hint:'Kręć = bok · Pochyl = przód · Stuknij = mocne uderzenie',
+ init:()=>({px:180,py:440,ax:180,k:{x:180,y:240,vx:50,vy:130},score:0,lives:3,sm:0}),
+ up(s,dt,i){dt=Math.max(dt,.001);const k=s.k;
+  const nx=clamp(s.px+i.turn*320*dt,26,334),ny=440-i.tilt*140,pvx=(nx-s.px)/dt,pvy=(ny-s.py)/dt;s.px=nx;s.py=ny;
+  const sp=130+s.score*12,na=s.ax+clamp(clamp(k.x,26,334)-s.ax,-sp*dt,sp*dt),avx=(na-s.ax)/dt;s.ax=na;
+  if(i.tap)s.sm=.2;s.sm-=dt;
+  const hit=(x,y,vx,vy,b)=>{const dx=k.x-x,dy=k.y-y,d=Math.hypot(dx,dy);if(d<32&&d>0){const ux=dx/d,uy=dy/d;k.x=x+ux*32;k.y=y+uy*32;
+    const vn=k.vx*ux+k.vy*uy;if(vn<0){k.vx-=2*vn*ux;k.vy-=2*vn*uy}k.vx+=vx*.5+ux*b;k.vy+=vy*.5+uy*b;
+    const m=Math.hypot(k.vx,k.vy)||1,t=clamp(m,140,640);k.vx*=t/m;k.vy*=t/m}};
+  k.x+=k.vx*dt;k.y+=k.vy*dt;if(k.x<10||k.x>350){k.x=clamp(k.x,10,350);k.vx*=-1}
+  const gap=k.x>110&&k.x<250;
+  if(k.y<10&&!gap){k.y=10;k.vy=Math.abs(k.vy)}if(k.y>470&&!gap){k.y=470;k.vy=-Math.abs(k.vy)}
+  hit(s.px,s.py,pvx,pvy,s.sm>0?280:0);hit(s.ax,70,avx,0,0);
+  const rs=()=>{k.x=180;k.y=240;k.vx=rnd(-60,60);k.vy=130};
+  if(k.y<-10){s.score++;rs()}if(k.y>490){s.lives--;rs()}return s.lives<=0},
+ dr(s,c){c.strokeStyle='#2e2848';c.lineWidth=2;c.beginPath();c.moveTo(0,240);c.lineTo(360,240);c.stroke();c.beginPath();c.arc(180,240,40,0,7);c.stroke();
+  c.fillStyle='#3dffb0';c.fillRect(110,0,140,5);c.fillStyle='#ff5470';c.fillRect(110,475,140,5);
+  c.fillStyle='#9a93b8';c.beginPath();c.arc(s.ax,70,22,0,7);c.fill();
+  c.fillStyle=s.sm>0?'#fff':'#ff2bd6';c.beginPath();c.arc(s.px,s.py,22,0,7);c.fill();
+  c.fillStyle='#f4f1ff';c.beginPath();c.arc(s.k.x,s.k.y,10,0,7);c.fill();hud(c,s.score,'♥'.repeat(s.lives))}},
+{id:'kosz',name:'Kosz',desc:'Kręć = kąt rzutu, stuknij = rzut (moc zmienia się sama). 45 sekund – ile trafisz?',hint:'Kręć = kąt · Stuknij w dobrym momencie = rzut',
+ init:()=>({ang:.9,ph:0,b:null,tm:45,score:0,hx:270,hy:200,msg:0}),
+ up(s,dt,i){s.tm-=dt;s.ph+=dt*2.2;s.msg-=dt;s.ang=clamp(s.ang-i.turn*1.2*dt,.35,1.4);
+  const pw=(Math.sin(s.ph)+1)/2,v=260+pw*460;
+  if(!s.b&&i.tap)s.b={x:60,y:430,vx:v*Math.cos(s.ang),vy:-v*Math.sin(s.ang)};
+  const b=s.b;if(b){const py=b.y;b.vy+=700*dt;b.x+=b.vx*dt;b.y+=b.vy*dt;
+   if(b.vx>0&&b.x>s.hx+32&&b.x<s.hx+44&&b.y>s.hy-60&&b.y<s.hy+5){b.vx*=-.4;b.x=s.hx+32}
+   if(py<s.hy&&b.y>=s.hy&&b.vy>0&&Math.abs(b.x-s.hx)<24){s.score++;s.msg=.8;s.hx=rnd(190,300);s.hy=rnd(120,260);s.b=null}
+   else if(b.y>500||b.x>390)s.b=null}
+  s.v=v;return s.tm<=0},
+ dr(s,c){const sh=s.hx,hy=s.hy;c.fillStyle='#ff8a3d';c.fillRect(sh-24,hy-3,48,5);c.fillStyle='#f4f1ff';c.fillRect(sh+32,hy-60,6,65);
+  c.strokeStyle='#9a93b8';c.lineWidth=1;for(let k=-20;k<=20;k+=10){c.beginPath();c.moveTo(sh+k,hy+2);c.lineTo(sh+k*.6,hy+28);c.stroke()}
+  c.fillStyle='#3a3454';c.fillRect(0,440,360,40);
+  if(!s.b){c.fillStyle='rgba(255,43,214,.55)';for(let t=.08;t<.9;t+=.08){const x=60+s.v*Math.cos(s.ang)*t,y=430-s.v*Math.sin(s.ang)*t+350*t*t;c.beginPath();c.arc(x,y,3,0,7);c.fill()}}
+  const b=s.b||{x:60,y:430};c.fillStyle='#ff8a3d';c.beginPath();c.arc(b.x,b.y,11,0,7);c.fill();
+  if(s.msg>0){c.fillStyle='#3dffb0';c.font='bold 40px system-ui';c.textAlign='center';c.fillText('KOSZ! +1',180,120);c.textAlign='left'}
+  hud(c,s.score,Math.ceil(s.tm)+' s')}}
+];
+function hud(c,sc,x){c.fillStyle='#f4f1ff';c.font='bold 22px system-ui';c.textAlign='left';c.fillText(sc,14,32);c.textAlign='right';c.fillStyle='#ff2bd6';c.fillText(x,346,32);c.textAlign='left'}
+/* ---------- Rekordy, menu, pętla ---------- */
+let best={};try{best=JSON.parse(localStorage.getItem('trikiBest')||'{}')}catch{}
+const save=()=>{try{localStorage.setItem('trikiBest',JSON.stringify(best))}catch{}};
+$('#rs').onclick=()=>{best={};save();drawMenu()};
+let scr='menu',sel=0,G=null,S=null,sc=0,newRec=false,lock=0,dir=0;
+const cv=$('#cv'),c=cv.getContext('2d');
+function drawMenu(){$('#menu').innerHTML=GAMES.map((g,k)=>`<div class="card ${k==sel?'sel':''}" data-k="${k}"><b>${g.name}</b><small>${g.desc}</small><em>Rekord: ${best[g.id]||0}</em></div>`).join('');
+  document.querySelectorAll('.card').forEach(e=>e.onclick=()=>start(+e.dataset.k));
+  $('#hint').textContent='Kręć Triki, aby wybrać grę · stuknij, aby zacząć'}
+function start(k){sel=k;G=GAMES[k];S=G.init();sc=0;newRec=false;scr='play';lock=.5;$('#menu').style.display='none';cv.style.display='block';$('#bm').style.display='';$('#hint').textContent=G.hint}
+function toMenu(){scr='menu';cv.style.display='none';$('#menu').style.display='';$('#bm').style.display='none';drawMenu()}
+$('#bm').onclick=toMenu;
+function over(){scr='over';lock=.8;sc=G.score?G.score(S):S.score|0;if(sc>(best[G.id]||0)){best[G.id]=sc;newRec=true;save()}}
+let last=performance.now();
+function loop(now){const dt=Math.min(.05,(now-last)/1000);last=now;const i=inp(dt);lock-=dt;
+  if(scr=='menu'){const d=i.turn>.6?1:i.turn<-.6?-1:0;if(d&&!dir){sel=(sel+d+GAMES.length)%GAMES.length;drawMenu()}dir=d;if(i.tap)start(sel)}
+  else{c.fillStyle='#0d0b14';c.fillRect(0,0,360,480);
+    if(scr=='play'){if(lock<=0&&G.up(S,dt,i))over()}
+    G.dr(S,c);
+    if(scr=='over'){c.fillStyle='rgba(13,11,20,.82)';c.fillRect(0,0,360,480);c.textAlign='center';c.fillStyle='#f4f1ff';c.font='bold 34px system-ui';c.fillText('Koniec gry',180,190);
+      c.font='bold 56px system-ui';c.fillStyle='#ff2bd6';c.fillText(sc,180,260);c.font='18px system-ui';c.fillStyle='#3dffb0';c.fillText(newRec?'Nowy rekord!':'Rekord: '+best[G.id],180,295);
+      c.fillStyle='#9a93b8';c.fillText('Stuknij – jeszcze raz',180,360);c.fillText('Odwróć – menu',180,388);c.textAlign='left';
+      if(lock<=0){if(i.tap)start(sel);else if(i.flip)toMenu()}}}
+  $('#dbg').textContent=`turn ${IN.turn.toFixed(2)} tilt ${IN.tilt.toFixed(2)} flip ${+IN.flip} | układ: ${off?off.o+(off.l?' LE':' BE'):'kalibracja…'} | pakiet: ${raw}`;
+  requestAnimationFrame(loop)}
+for(const [id,f]of[['s1',v=>cfg.twist=20000/v],['s2',v=>cfg.tilt=250/v],['s3',v=>cfg.tap=6000/v]])$('#'+id).oninput=e=>f(+e.target.value);
+$('#inv').onchange=e=>cfg.inv=e.target.checked;
+drawMenu();requestAnimationFrame(loop);
+</script></body></html>
