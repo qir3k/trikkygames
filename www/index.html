@@ -5,6 +5,7 @@
 <style>
 :root{--bg:#14121c;--card:#1f1b2e;--fg:#f4f1ff;--mut:#9a93b8;--pk:#ff2bd6;--gr:#3dffb0;color-scheme:dark}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;padding:12px;min-height:100vh}
+body.nat{padding-top:calc(env(safe-area-inset-top,0px) + 44px);padding-bottom:calc(env(safe-area-inset-bottom,0px) + 28px)}
 h1{margin:4px 0 8px;font-size:24px;letter-spacing:1px}h1 span{color:var(--pk)}
 .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center;margin-bottom:8px}
 button{background:var(--pk);color:#fff;border:0;border-radius:10px;padding:9px 14px;font-weight:700;font-size:15px;cursor:pointer}
@@ -22,6 +23,7 @@ input[type=range]{width:55%}#dbg{font:11px monospace;color:var(--mut);word-break
 </style></head><body>
 <h1>TRIKI <span>ARCADE</span></h1>
 <div class="bar"><button id="bc">Połącz z Triki</button><span class="pill" id="st">niepołączone</span><button class="g" id="bm" style="display:none">Menu</button></div>
+<div id="dl" style="width:min(420px,100%)"></div>
 <div id="menu"></div>
 <canvas id="cv" width="360" height="480"></canvas>
 <div id="hint"></div>
@@ -64,31 +66,54 @@ const NAT=!!(window.Capacitor&&Capacitor.isNativePlatform&&Capacitor.isNativePla
 const CMD=[0x20,0x10,0x00,0xd0,0x07,0x34,0x00,0x03];
 const hex2dv=h=>new DataView(new Uint8Array(h.replace(/[^0-9a-fA-F]/g,'').match(/../g).map(x=>parseInt(x,16))).buffer);
 const disc=()=>{$('#st').textContent='rozłączone';$('#st').classList.remove('on');IN.turn=IN.tilt=0};
+const devs={};let scanL=null,busy=false;
+const nm=d=>d.name||'(bez nazwy)';
+function renderDevs(){
+  const l=Object.values(devs).sort((a,b)=>(/triki/i.test(b.name||'')-/triki/i.test(a.name||''))||b.rssi-a.rssi).slice(0,12);
+  $('#dl').innerHTML=l.map(d=>`<button class="g" data-id="${d.id}" style="display:block;width:100%;margin:5px 0;text-align:left">${/triki/i.test(d.name||'')?'⭐ ':''}${nm(d)} <small style="opacity:.6">${d.id.slice(-8)} · ${d.rssi} dBm</small></button>`).join('');
+  document.querySelectorAll('#dl button').forEach(b=>b.onclick=()=>pick(b.dataset.id));
+}
 async function connect(){
   try{
-    off=null;cal={n:0,sc:{}};nb=0;$('#st').textContent='szukam Triki…';
-    if(NAT){
-      const B=Capacitor.Plugins.BluetoothLe;
-      await B.initialize({androidNeverForLocation:true});
-      const r=await B.requestDevice({namePrefix:'Triki',optionalServices:[NUS]});
-      const id=(r.device||r).deviceId;
-      await B.addListener('disconnected|'+id,disc);
-      await B.connect({deviceId:id});
-      await B.addListener(`notification|${id}|${NUS}|${TXU}`,e=>onPkt(hex2dv(e.value)));
-      await B.startNotifications({deviceId:id,service:NUS,characteristic:TXU});
-      await B.write({deviceId:id,service:NUS,characteristic:RXU,value:CMD.map(b=>b.toString(16).padStart(2,'0')).join(' ')});
-    }else{
-      dev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'Triki'},{services:[NUS]}],optionalServices:[NUS]});
-      dev.addEventListener('gattserverdisconnected',disc);
-      const sv=await(await dev.gatt.connect()).getPrimaryService(NUS);
-      const tx=await sv.getCharacteristic(TXU),rx=await sv.getCharacteristic(RXU);
-      tx.addEventListener('characteristicvaluechanged',e=>onPkt(e.target.value));
-      await tx.startNotifications();
-      try{await rx.writeValue(new Uint8Array(CMD))}catch{await rx.writeValueWithoutResponse(new Uint8Array(CMD))}
-    }
-    $('#st').textContent='kalibracja – połóż Triki płasko…';$('#st').classList.add('on');
-  }catch(e){$('#st').textContent='błąd: '+(e.message||JSON.stringify(e));}
+    if(!NAT){return webConnect()}
+    const B=Capacitor.Plugins.BluetoothLe;
+    $('#st').textContent='przygotowanie…';
+    await B.initialize({androidNeverForLocation:false});
+    try{const l=await B.isLocationEnabled();if(!l.value)alert('Włącz Lokalizację w ustawieniach telefonu – Android wymaga tego do skanowania Bluetooth.')}catch{}
+    for(const k in devs)delete devs[k];renderDevs();
+    if(!scanL)scanL=await B.addListener('onScanResult',e=>{const d=e.device||{};if(!d.deviceId)return;
+      devs[d.deviceId]={id:d.deviceId,name:e.localName||d.name,rssi:e.rssi};renderDevs();$('#st').textContent='skanuję… znaleziono '+Object.keys(devs).length});
+    await B.requestLEScan({allowDuplicates:true});
+    $('#st').textContent='skanuję… wybierz Triki z listy';
+    setTimeout(()=>{B.stopLEScan().catch(()=>{});if(!busy)$('#st').textContent='koniec skanu ('+Object.keys(devs).length+') – kliknij Połącz, by powtórzyć'},15000);
+  }catch(e){$('#st').textContent='błąd: '+(e.message||JSON.stringify(e))}
 }
+async function pick(id){
+  const B=Capacitor.Plugins.BluetoothLe;busy=true;
+  try{await B.stopLEScan()}catch{}
+  try{
+    off=null;cal={n:0,sc:{}};nb=0;$('#st').textContent='łączę…';
+    await B.addListener('disconnected|'+id,disc);
+    await B.connect({deviceId:id,timeout:10000});
+    $('#st').textContent='pobieram usługi…';
+    await B.addListener(`notification|${id}|${NUS}|${TXU}`,e=>onPkt(hex2dv(e.value)));
+    await B.startNotifications({deviceId:id,service:NUS,characteristic:TXU});
+    await B.write({deviceId:id,service:NUS,characteristic:RXU,value:CMD.map(b=>b.toString(16).padStart(2,'0')).join(' ')});
+    $('#dl').innerHTML='';$('#st').textContent='kalibracja – połóż Triki płasko…';$('#st').classList.add('on');
+  }catch(e){$('#st').textContent='błąd: '+(e.message||JSON.stringify(e))}
+  busy=false;
+}
+async function webConnect(){
+  dev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'Triki'},{services:[NUS]}],optionalServices:[NUS]});
+  dev.addEventListener('gattserverdisconnected',disc);
+  const sv=await(await dev.gatt.connect()).getPrimaryService(NUS);
+  const tx=await sv.getCharacteristic(TXU),rx=await sv.getCharacteristic(RXU);
+  tx.addEventListener('characteristicvaluechanged',e=>onPkt(e.target.value));
+  await tx.startNotifications();
+  try{await rx.writeValue(new Uint8Array(CMD))}catch{await rx.writeValueWithoutResponse(new Uint8Array(CMD))}
+  $('#st').textContent='kalibracja – połóż Triki płasko…';$('#st').classList.add('on');
+}
+if(NAT)document.body.classList.add('nat');
 $('#bc').onclick=connect;
 /* ---------- Wejście (Triki + klawiatura) ---------- */
 const KB={l:0,r:0,u:0,d:0,f:0};let kt=0;

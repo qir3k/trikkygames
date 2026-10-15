@@ -13,6 +13,25 @@ jobs:
         with: { distribution: temurin, java-version: 21 }
       - run: npm install
       - run: npx cap add android
+      - name: Patch manifest permissions
+        run: |
+          python3 - <<'PY'
+          p='android/app/src/main/AndroidManifest.xml'
+          s=open(p).read()
+          if 'xmlns:tools' not in s:
+              s=s.replace('<manifest ','<manifest xmlns:tools="http://schemas.android.com/tools" ',1)
+          perms='''
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" tools:remove="android:usesPermissionFlags" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+              <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+          '''
+          s=s.replace('<application',perms+'<application',1)
+          open(p,'w').write(s)
+          PY
       - run: npx cap sync android
       - run: chmod +x gradlew && ./gradlew assembleDebug
         working-directory: android
