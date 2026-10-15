@@ -102,10 +102,10 @@ async function pick(id){
     $('#st').textContent='pobieram usługi…';
     let S=NUS,TX=TXU,RX=RXU,wnr=false;
     try{
-      const r=await B.getServices({deviceId:id});L('services: '+JSON.stringify(r).slice(0,700));
+      const r=await B.getServices({deviceId:id});
       const sv=(r.services||[]).find(x=>(x.uuid||'').toLowerCase()==NUS);
       if(!sv)throw new Error('To urządzenie nie ma usługi Triki (NUS)');
-      const cs=sv.characteristics||[],f=u=>cs.find(c=>(c.uuid||'').toLowerCase()==u);
+      const cs=sv.characteristics||[];L('NUS: '+JSON.stringify(cs.map(c=>[(c.uuid||'').slice(0,8),Object.keys(c.properties||{}).filter(k=>c.properties[k]).join('+')])));const f=u=>cs.find(c=>(c.uuid||'').toLowerCase()==u);
       S=sv.uuid;TX=(f(TXU)||{}).uuid||TXU;const rc=f(RXU)||{};RX=rc.uuid||RXU;
       const pr=rc.properties||{};wnr=!!pr.writeWithoutResponse&&!pr.write;
     }catch(e){if(/NUS/.test(e.message))throw e;L('getServices pominięte: '+(e.message||JSON.stringify(e)))}
@@ -114,7 +114,16 @@ async function pick(id){
     await B.startNotifications({deviceId:id,service:S,characteristic:TX});L('notify ok');
     await sleep(500);
     const val=CMD.map(b=>b.toString(16).padStart(2,'0')).join(' ');
-    await (wnr?B.writeWithoutResponse:B.write).call(B,{deviceId:id,service:S,characteristic:RX,value:val});L('write ok');
+    let W={m:0,p:false};try{W=JSON.parse(localStorage.getItem('trikiW'))||W}catch{}
+    const mode=W.p?Math.min(2,W.m+1):W.m;
+    const sw=o=>{try{localStorage.setItem('trikiW',JSON.stringify(o))}catch{}};
+    if(mode==2){L('zapis komendy POMINIĘTY (tryb 2)');sw({m:2,p:false})}
+    else{
+      const meth=((mode==0)!==wnr)?'write':'writeWithoutResponse';
+      L('zapis tryb '+mode+' metodą '+meth);sw({m:mode,p:true});
+      await B[meth]({deviceId:id,service:S,characteristic:RX,value:val,timeout:5000});
+      sw({m:mode,p:false});L('write ok');
+    }
     $('#dl').innerHTML='';$('#st').textContent='kalibracja – połóż Triki płasko…';$('#st').classList.add('on');
   }catch(e){const m=e.message||JSON.stringify(e);L('BŁĄD '+m);$('#st').textContent='błąd: '+m}
   busy=false;
