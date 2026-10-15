@@ -1,0 +1,12 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^node --check <\\(sed -n '/<script>/,/<\\\\/script>/p' www/index\\.html \\| sed '1d;\\$d'\\)$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^sed -n '/<script>/,/<\\\\/script>/p' www/index\\.html \\| sed '1d;\\$d' \\| node --check$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

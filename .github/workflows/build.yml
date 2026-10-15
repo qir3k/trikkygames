@@ -2,6 +2,8 @@ name: Build APK
 on:
   push:
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -27,15 +29,94 @@ jobs:
               <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
               <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
               <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+              <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
               <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
           '''
           s=s.replace('<application',perms+'<application',1)
           open(p,'w').write(s)
           PY
-      - run: npx cap sync android
-      - run: chmod +x gradlew && ./gradlew assembleDebug
+      - name: Set app version and signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then APP_VERSION="${GITHUB_REF_NAME#v}"; else APP_VERSION="$(node -p "require('./package.json').version")"; fi
+          VERSION_CODE="$GITHUB_RUN_NUMBER"
+          if [[ -n "$ANDROID_KEYSTORE_BASE64" ]]; then
+            mkdir -p "$HOME/.android"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/triki-release.jks"
+            ANDROID_KEYSTORE_PATH="$HOME/.android/triki-release.jks"
+            ANDROID_SIGNED=true
+            echo "ANDROID_KEYSTORE_PATH=$ANDROID_KEYSTORE_PATH" >> "$GITHUB_ENV"
+            echo "ANDROID_SIGNED=true" >> "$GITHUB_ENV"
+          else
+            ANDROID_SIGNED=false
+            echo "ANDROID_SIGNED=false" >> "$GITHUB_ENV"
+          fi
+          export APP_VERSION VERSION_CODE ANDROID_SIGNED
+          python3 - <<'PY'
+          import os, re
+          path = 'android/app/build.gradle'
+          text = open(path).read()
+          text, code_count = re.subn(r'(?m)^(\s*versionCode\s+)\d+', rf'\g<1>{os.environ["VERSION_CODE"]}', text, count=1)
+          text, name_count = re.subn(r'(?m)^(\s*versionName\s+)[\'"][^\'"]*[\'"]', rf'\g<1>\'{os.environ["APP_VERSION"]}\'', text, count=1)
+          if not code_count or not name_count:
+              raise SystemExit('Nie znaleziono versionCode/versionName w android/app/build.gradle')
+          web_path = 'www/index.html'
+          web = open(web_path).read()
+          web, version_count = re.subn(r'(<meta name="app-version" content=")[^"]+(">)', lambda match: match.group(1) + os.environ['APP_VERSION'] + match.group(2), web, count=1)
+          if not version_count:
+              raise SystemExit('Nie znaleziono meta app-version w www/index.html')
+          open(web_path, 'w').write(web)
+          if os.environ['ANDROID_SIGNED'] == 'true':
+              text += '''
+
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file(System.getenv("ANDROID_KEYSTORE_PATH"))
+                      storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                      keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+                  }
+              }
+              buildTypes {
+                  release { signingConfig signingConfigs.release }
+              }
+          }
+          '''
+          open(path, 'w').write(text)
+          PY
+          npx cap sync android
+      - name: Build APK
+        id: build
         working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          if [[ "$ANDROID_SIGNED" == "true" ]]; then
+            ./gradlew assembleRelease
+            APK_PATH="app/build/outputs/apk/release/app-release.apk"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Brak klucza Android w sekretach; APK debug nie będzie aktualizowalny między buildami."
+            ./gradlew assembleDebug
+            APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "apk=$APK_PATH" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: TRIKI-Arcade-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: TRIKI-Arcade-apk-${{ github.run_number }}
+          path: android/${{ steps.build.outputs.apk }}
+      - name: Publish release APK
+        if: startsWith(github.ref, 'refs/tags/v') && steps.build.outputs.signed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: TRIKI Arcade ${{ github.ref_name }}
+          files: android/${{ steps.build.outputs.apk }}
