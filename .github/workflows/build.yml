@@ -61,7 +61,7 @@ jobs:
           path = 'android/app/build.gradle'
           text = open(path).read()
           text, code_count = re.subn(r'(?m)^(\s*versionCode\s+)\d+', rf'\g<1>{os.environ["VERSION_CODE"]}', text, count=1)
-          text, name_count = re.subn(r'(?m)^(\s*versionName\s+)[\'"][^\'"]*[\'"]', rf'\g<1>\'{os.environ["APP_VERSION"]}\'', text, count=1)
+          text, name_count = re.subn(r'(?m)^(\s*versionName\s+)[\'"][^\'"]*[\'"]', lambda match: match.group(1) + '"' + os.environ['APP_VERSION'] + '"', text, count=1)
           if not code_count or not name_count:
               raise SystemExit('Nie znaleziono versionCode/versionName w android/app/build.gradle')
           web_path = 'www/index.html'

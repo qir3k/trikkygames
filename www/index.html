@@ -213,13 +213,14 @@ $('#bu').onclick=()=>updateRelease?installUpdate():checkUpdates();
 $('#bc').onclick=connect;
 /* ---------- Wejście (Triki + klawiatura) ---------- */
 const KB={l:0,r:0,u:0,d:0,f:0};let kt=0;
+const FRAME_INPUT={turn:0,tilt:0,flip:false,tap:false};
 addEventListener('keydown',e=>{const k=e.key;
   if(k=='ArrowLeft')KB.l=1;if(k=='ArrowRight')KB.r=1;if(k=='ArrowUp')KB.u=1;if(k=='ArrowDown')KB.d=1;if(k=='f'||k=='F')KB.f=1;
   if(k==' '&&!e.repeat){IN.tap=true;e.preventDefault()}if(k=='Escape')toMenu();if(k.startsWith('Arrow'))e.preventDefault();});
 addEventListener('keyup',e=>{const k=e.key;
   if(k=='ArrowLeft')KB.l=0;if(k=='ArrowRight')KB.r=0;if(k=='ArrowUp')KB.u=0;if(k=='ArrowDown')KB.d=0;if(k=='f'||k=='F')KB.f=0;});
 function inp(dt){kt=clamp(kt+(KB.u-KB.d||-1)*1.4*dt*(KB.u||KB.d?1:.7),0,1);
-  const r={turn:(KB.r-KB.l)||IN.turn,tilt:Math.max(kt,IN.tilt),flip:!!KB.f||IN.flip,tap:IN.tap};IN.tap=false;return r;}
+  FRAME_INPUT.turn=(KB.r-KB.l)||IN.turn;FRAME_INPUT.tilt=Math.max(kt,IN.tilt);FRAME_INPUT.flip=!!KB.f||IN.flip;FRAME_INPUT.tap=IN.tap;IN.tap=false;return FRAME_INPUT;}
 /* ---------- Minigry ---------- */
 const adiff=(a,b)=>Math.abs(Math.atan2(Math.sin(a-b),Math.cos(a-b)));
 const GAMES=[
@@ -310,7 +311,7 @@ let best={};try{best=JSON.parse(localStorage.getItem('trikiBest')||'{}')}catch{}
 const save=()=>{try{localStorage.setItem('trikiBest',JSON.stringify(best))}catch{}};
 $('#rs').onclick=()=>{best={};save();drawMenu()};
 let scr='menu',sel=0,G=null,S=null,sc=0,newRec=false,lock=0,dir=0;
-const cv=$('#cv'),c=cv.getContext('2d');
+const cv=$('#cv'),c=cv.getContext('2d',{alpha:false,desynchronized:true});
 function drawMenu(){$('#menu').innerHTML=GAMES.map((g,k)=>`<div class="card ${k==sel?'sel':''}" data-k="${k}"><b>${g.name}</b><small>${g.desc}</small><em>Rekord: ${best[g.id]||0}</em></div>`).join('');
   document.querySelectorAll('.card').forEach(e=>e.onclick=()=>start(+e.dataset.k));
   $('#hint').textContent='Kręć Triki, aby wybrać grę · stuknij, aby zacząć'}
@@ -318,8 +319,14 @@ function start(k){sel=k;G=GAMES[k];S=G.init();sc=0;newRec=false;scr='play';lock=
 function toMenu(){scr='menu';cv.style.display='none';$('#menu').style.display='';$('#bm').style.display='none';drawMenu()}
 $('#bm').onclick=toMenu;
 function over(){scr='over';lock=.8;sc=G.score?G.score(S):S.score|0;if(sc>(best[G.id]||0)){best[G.id]=sc;newRec=true;save()}}
-let last=performance.now();
-function loop(now){const dt=Math.min(.05,(now-last)/1000);last=now;const i=inp(dt);lock-=dt;
+let last=performance.now(),diagAt=last,diagFrames=0,diagFps=0;
+function updateDiagnostics(now){
+  diagFrames++;const elapsed=now-diagAt;if(elapsed<500)return;
+  diagFps=Math.round(diagFrames*1000/elapsed);diagFrames=0;diagAt=now;
+  if(!$('details').open)return;
+  $('#dbg').textContent=`FPS ${diagFps} | turn ${IN.turn.toFixed(2)} tilt ${IN.tilt.toFixed(2)} flip ${+IN.flip} button ${BTN.mode} | próbki: ${nS}${booted?'':' (kalibracja…)'} | pakiet: ${raw}`;
+}
+function loop(now){const dt=Math.min(.05,(now-last)/1000);last=now;updateDiagnostics(now);const i=inp(dt);lock-=dt;
   if(scr=='menu'){const d=i.turn>.6?1:i.turn<-.6?-1:0;if(d&&!dir){sel=(sel+d+GAMES.length)%GAMES.length;drawMenu()}dir=d;if(i.tap)start(sel)}
   else{c.fillStyle='#0d0b14';c.fillRect(0,0,360,480);
     if(scr=='play'){if(lock<=0&&G.up(S,dt,i))over()}
@@ -328,7 +335,6 @@ function loop(now){const dt=Math.min(.05,(now-last)/1000);last=now;const i=inp(d
       c.font='bold 56px system-ui';c.fillStyle='#ff2bd6';c.fillText(sc,180,260);c.font='18px system-ui';c.fillStyle='#3dffb0';c.fillText(newRec?'Nowy rekord!':'Rekord: '+best[G.id],180,295);
       c.fillStyle='#9a93b8';c.fillText('Stuknij – jeszcze raz',180,360);c.fillText('Odwróć – menu',180,388);c.textAlign='left';
       if(lock<=0){if(i.tap)start(sel);else if(i.flip)toMenu()}}}
-  $('#dbg').textContent=`turn ${IN.turn.toFixed(2)} tilt ${IN.tilt.toFixed(2)} flip ${+IN.flip} button ${BTN.mode} | próbki: ${nS}${booted?'':' (kalibracja…)'} | pakiet: ${raw}`;
   requestAnimationFrame(loop)}
 for(const [id,f]of[['s1',v=>cfg.twist=13000/v],['s2',v=>cfg.tilt=5000/v],['s3',v=>cfg.tap=1900/v]])$('#'+id).oninput=e=>f(+e.target.value);
 $('#inv').onchange=e=>cfg.inv=e.target.checked;
