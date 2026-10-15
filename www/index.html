@@ -38,38 +38,57 @@ input[type=range]{width:55%}#dbg{font:11px monospace;color:var(--mut);word-break
 <script>
 const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e',RXU='6e400002-b5a3-f393-e0a9-e50e24dcca9e',TXU='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 const $=s=>document.querySelector(s),clamp=(x,a,b)=>Math.max(a,Math.min(b,x)),rnd=(a,b)=>a+Math.random()*(b-a);
-const cfg={twist:4000,tilt:50,tap:1200,inv:false};
+const cfg={twist:2600,tilt:1000,tap:380,inv:false};
 const IN={turn:0,tilt:0,flip:false,tap:false};
 /* ---------- Triki: Bluetooth + dekodowanie ruchu ---------- */
-let off=null,cal={n:0,sc:{}},bias=[0,0,0],nb=0,aM=2050,lastTap=0,raw='',dev=null;
-const rd=(dv,o,l)=>Array.from({length:6},(_,i)=>dv.getInt16(o+i*2,l));
+/* dekoder i wykrywanie gestów oparte na sprawdzonym silniku TRIKI-Control */
+const GRV=2050;let buf=[],boot=[],booted=false,t0=0,grav=null,bias=[0,0,0],nS=0,still=0,flipT=0,armed=true,lastTap=0,raw='',dev=null,off=null;
+const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],nrm=a=>Math.hypot(a[0],a[1],a[2]),med=a=>a.slice().sort((x,y)=>x-y)[a.length>>1];
+function resetDec(){buf=[];boot=[];booted=false;grav=null;nS=0;IN.turn=IN.tilt=0}
 function onPkt(dv){
-  const n=dv.byteLength;if(n<12)return;
-  raw=Array.from(new Uint8Array(dv.buffer,dv.byteOffset,n),b=>b.toString(16).padStart(2,'0')).join(' ');
-  if(!off){ // autodetekcja układu pakietu: w spoczynku płasko a≈(24,0,-2050), żyro≈0
-    for(let o=0;o<=n-12;o++)for(const l of[1,0]){const v=rd(dv,o,!!l),k=o+':'+l;
-      cal.sc[k]=(cal.sc[k]||0)+Math.abs(v[5]+2050)+Math.abs(v[4])+Math.abs(v[3])+Math.abs(v[0])+Math.abs(v[1])+Math.abs(v[2]);}
-    if(++cal.n>=30){const k=Object.keys(cal.sc).sort((a,b)=>cal.sc[a]-cal.sc[b])[0].split(':');off={o:+k[0],l:k[1]=='1'};$('#st').textContent='połączone ✓';}
-    return;
+  raw=Array.from(new Uint8Array(dv.buffer,dv.byteOffset,dv.byteLength),b=>b.toString(16).padStart(2,'0')).join(' ');
+  for(let i=0;i<dv.byteLength;i++)buf.push(dv.getUint8(i));
+  for(;;){
+    let k=-1;for(let i=0;i<buf.length-1;i++)if(buf[i]==0x22&&buf[i+1]<=15){k=i;break}
+    if(k<0){buf=(buf.length&&buf[buf.length-1]==0x22)?[0x22]:[];return}
+    if(k)buf.splice(0,k);
+    if(buf.length<14)return;
+    const f=buf.splice(0,14),v=[];
+    for(let j=2;j<14;j+=2){let x=f[j]|(f[j+1]<<8);if(x>32767)x-=65536;v.push(x)}
+    proc(v);
   }
-  const v=rd(dv,off.o,off.l),g=v.slice(0,3),a=v.slice(3),am=Math.hypot(...a)||1;
-  if(nb<150||Math.hypot(g[0]-bias[0],g[1]-bias[1],g[2]-bias[2])<150){const r=nb<150?.05:.003;for(let i=0;i<3;i++)bias[i]+=(g[i]-bias[i])*r;}nb++;
-  const gc=g.map((x,i)=>x-bias[i]),rate=(gc[0]*a[0]+gc[1]*a[1]+gc[2]*a[2])/am; // obrót wokół osi grawitacji = niezależny od ułożenia
-  let t=clamp((cfg.inv?rate:-rate)/cfg.twist,-1,1);if(Math.abs(t)<.12)t=0;
+}
+function proc(v){
+  const now=performance.now()/1000,g=v.slice(0,3),a=v.slice(3),am=nrm(a);nS++;
+  if(am<800||am>8000)return;
+  if(!grav){grav=a.slice();bias=g.slice();t0=now}
+  if(!booted){boot.push([g,a]);
+    if(now-t0>=1.2&&boot.length>=5){for(let i=0;i<3;i++){bias[i]=med(boot.map(x=>x[0][i]));grav[i]=med(boot.map(x=>x[1][i]))}booted=true;boot=[];$('#st').textContent='połączone ✓'}
+    return}
+  const dev=Math.abs(am-GRV),al=dev<400?.25:0;for(let i=0;i<3;i++)grav[i]=(1-al)*grav[i]+al*a[i];
+  const gn=nrm(grav),gu=grav.map(x=>x/gn),gc=g.map((x,i)=>x-bias[i]),spin=nrm(gc),twist=dot(gc,gu);
+  const imp=Math.abs(Math.abs(dot(a,gu))-GRV),tilt=Math.sqrt(Math.max(0,GRV*GRV-grav[2]*grav[2]));
+  if(spin<220&&dev<90){if(!still)still=now;if(now-still>=.2)for(let i=0;i<3;i++)bias[i]=.95*bias[i]+.05*g[i]}else still=0;
+  // kręcenie wokół osi grawitacji
+  let t=clamp((cfg.inv?twist:-twist)/cfg.twist,-1,1);if(Math.abs(t)<.3)t=0;
   IN.turn+=(t-IN.turn)*.5;
-  IN.tilt=clamp(Math.acos(Math.min(1,Math.abs(a[2])/am))*57.3/cfg.tilt,0,1);
-  IN.flip=a[2]/am>.7;
-  aM+=(am-aM)*.05;const now=performance.now();
-  if(Math.abs(am-aM)>cfg.tap&&now-lastTap>250){IN.tap=true;lastTap=now;}
+  IN.tilt=clamp((tilt-100)/(cfg.tilt-100),0,1);
+  // odwrócenie
+  if(grav[2]>=1200&&dev<90&&spin<400){if(!flipT)flipT=now;IN.flip=now-flipT>=.3}else{flipT=0;IN.flip=false}
+  // stuknięcie
+  if(imp<cfg.tap*.5)armed=true;
+  if(imp>=cfg.tap&&spin<800&&tilt<550&&armed&&now-lastTap>=.45&&!IN.flip){IN.tap=true;armed=false;lastTap=now}
 }
 const NAT=!!(window.Capacitor&&Capacitor.isNativePlatform&&Capacitor.isNativePlatform());
 const CMD=[0x20,0x10,0x00,0xd0,0x07,0x34,0x00,0x03];
 const hex2dv=h=>new DataView(new Uint8Array(((h||'').replace(/[^0-9a-fA-F]/g,'').match(/../g)||[]).map(x=>parseInt(x,16))).buffer);
-const disc=()=>{$('#st').textContent='rozłączone';$('#st').classList.remove('on');IN.turn=IN.tilt=0};
+let curId=null;
+async function disconnect(){try{await Capacitor.Plugins.BluetoothLe.disconnect({deviceId:curId})}catch(e){}disc()}
+const disc=()=>{$('#bc').textContent='Połącz z Triki';$('#bc').onclick=connect;$('#st').textContent='rozłączone';$('#st').classList.remove('on');IN.turn=IN.tilt=0};
 const devs={};let scanL=null,busy=false;
 const nm=d=>d.name||'(bez nazwy)';
 function renderDevs(){
-  const l=Object.values(devs).filter(d=>/triki/i.test(d.name||'')).sort((a,b)=>b.rssi-a.rssi);
+  const l=Object.values(devs).filter(d=>d.t).sort((a,b)=>b.rssi-a.rssi);
   $('#dl').innerHTML=l.map(d=>`<button class="g" data-id="${d.id}" style="display:block;width:100%;margin:5px 0;text-align:left">Triki <small style="opacity:.6">${d.id.slice(-8)} · ${d.rssi} dBm</small></button>`).join('');
   document.querySelectorAll('#dl button').forEach(b=>b.onclick=()=>pick(b.dataset.id));
 }
@@ -85,7 +104,7 @@ async function connect(){
     try{const l=await B.isLocationEnabled();if(!l.value)alert('Włącz Lokalizację w ustawieniach telefonu – Android wymaga tego do skanowania Bluetooth.')}catch{}
     for(const k in devs)delete devs[k];renderDevs();
     if(!scanL)scanL=await B.addListener('onScanResult',e=>{const d=e.device||{};if(!d.deviceId)return;
-      devs[d.deviceId]={id:d.deviceId,name:e.localName||d.name,rssi:e.rssi};renderDevs();$('#st').textContent='skanuję… szukam Triki ('+Object.values(devs).filter(d=>/triki/i.test(d.name||'')).length+')'});
+      devs[d.deviceId]={id:d.deviceId,name:e.localName||d.name,rssi:e.rssi,t:/triki/i.test(e.localName||d.name||'')||(e.uuids||[]).some(u=>(u||'').toLowerCase()==NUS)};renderDevs();$('#st').textContent='skanuję… szukam Triki ('+Object.values(devs).filter(d=>d.t).length+')'});
     await B.requestLEScan({allowDuplicates:true});
     $('#st').textContent='skanuję… wciśnij przycisk na Triki';
     setTimeout(()=>{B.stopLEScan().catch(()=>{});if(!busy)$('#st').textContent='koniec skanu ('+Object.keys(devs).length+') – kliknij Połącz, by powtórzyć'},15000);
@@ -95,7 +114,7 @@ async function pick(id){
   const B=Capacitor.Plugins.BluetoothLe;busy=true;LOG=[];
   try{await B.stopLEScan()}catch{}
   try{
-    off=null;cal={n:0,sc:{}};nb=0;$('#st').textContent='łączę…';L('connect '+id);
+    resetDec();$('#st').textContent='łączę…';L('connect '+id);
     await B.addListener('disconnected|'+id,disc);
     await B.connect({deviceId:id,timeout:10000});L('connected');
     await sleep(1200);
@@ -113,17 +132,12 @@ async function pick(id){
     await sleep(300);
     await B.startNotifications({deviceId:id,service:S,characteristic:TX});L('notify ok');
     await sleep(500);
-    const val=CMD.map(b=>b.toString(16).padStart(2,'0')).join(' ');
-    let W={m:0,p:false};try{W=JSON.parse(localStorage.getItem('trikiW'))||W}catch{}
-    const mode=W.p?Math.min(2,W.m+1):W.m;
-    const sw=o=>{try{localStorage.setItem('trikiW',JSON.stringify(o))}catch{}};
-    if(mode==2){L('zapis komendy POMINIĘTY (tryb 2)');sw({m:2,p:false})}
-    else{
-      const meth=((mode==0)!==wnr)?'write':'writeWithoutResponse';
-      L('zapis tryb '+mode+' metodą '+meth);sw({m:mode,p:true});
-      await B[meth]({deviceId:id,service:S,characteristic:RX,value:val,timeout:5000});
-      sw({m:mode,p:false});L('write ok');
-    }
+    try{localStorage.removeItem('trikiW')}catch{}
+    const val=CMD.map(b=>b.toString(16).padStart(2,'0')).join('');
+    const meth='writeWithoutResponse';
+    L('zapis '+val+' metodą '+meth);
+    await B[meth]({deviceId:id,service:S,characteristic:RX,value:val,timeout:5000});L('write ok');
+    curId=id;$('#bc').textContent='Rozłącz';$('#bc').onclick=disconnect;
     $('#dl').innerHTML='';$('#st').textContent='kalibracja – połóż Triki płasko…';$('#st').classList.add('on');
   }catch(e){const m=e.message||JSON.stringify(e);L('BŁĄD '+m);$('#st').textContent='błąd: '+m}
   busy=false;
@@ -257,9 +271,9 @@ function loop(now){const dt=Math.min(.05,(now-last)/1000);last=now;const i=inp(d
       c.font='bold 56px system-ui';c.fillStyle='#ff2bd6';c.fillText(sc,180,260);c.font='18px system-ui';c.fillStyle='#3dffb0';c.fillText(newRec?'Nowy rekord!':'Rekord: '+best[G.id],180,295);
       c.fillStyle='#9a93b8';c.fillText('Stuknij – jeszcze raz',180,360);c.fillText('Odwróć – menu',180,388);c.textAlign='left';
       if(lock<=0){if(i.tap)start(sel);else if(i.flip)toMenu()}}}
-  $('#dbg').textContent=`turn ${IN.turn.toFixed(2)} tilt ${IN.tilt.toFixed(2)} flip ${+IN.flip} | układ: ${off?off.o+(off.l?' LE':' BE'):'kalibracja…'} | pakiet: ${raw}`;
+  $('#dbg').textContent=`turn ${IN.turn.toFixed(2)} tilt ${IN.tilt.toFixed(2)} flip ${+IN.flip} | próbki: ${nS}${booted?'':' (kalibracja…)'} | pakiet: ${raw}`;
   requestAnimationFrame(loop)}
-for(const [id,f]of[['s1',v=>cfg.twist=20000/v],['s2',v=>cfg.tilt=250/v],['s3',v=>cfg.tap=6000/v]])$('#'+id).oninput=e=>f(+e.target.value);
+for(const [id,f]of[['s1',v=>cfg.twist=13000/v],['s2',v=>cfg.tilt=5000/v],['s3',v=>cfg.tap=1900/v]])$('#'+id).oninput=e=>f(+e.target.value);
 $('#inv').onchange=e=>cfg.inv=e.target.checked;
 drawMenu();requestAnimationFrame(loop);
 </script></body></html>
