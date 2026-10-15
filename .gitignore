@@ -1,1 +1,5 @@
 node_modules/
+*.jks
+*.keystore
+debug.keystore
+klucz_base64.txt
