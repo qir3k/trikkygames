@@ -1,0 +1,431 @@
+const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e',RXU='6e400002-b5a3-f393-e0a9-e50e24dcca9e',TXU='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const $=s=>document.querySelector(s),clamp=(x,a,b)=>Math.max(a,Math.min(b,x)),rnd=(a,b)=>a+Math.random()*(b-a);
+const cfg={twist:2600,tilt:1000,tap:380,inv:false};
+let IN={turn:0,tilt:0,flip:false,tap:false};
+/* ---------- Triki: Bluetooth + dekodowanie ruchu ---------- */
+/* dekoder i wykrywanie gestów oparte na sprawdzonym silniku TRIKI-Control */
+const GRV=2050;let buf=[],boot=[],booted=false,t0=0,grav=null,bias=[0,0,0],nS=0,still=0,flipT=0,armed=true,lastTap=0,raw='',dev=null,off=null;
+let BTN={mode:'unknown',last:-1,run:0,longest:0,seen:0,pressed:false,candidate:false,since:0,pressedAt:0};
+let MOTION={lastAt:0,turnOn:false,tapQuietAt:0};
+const IN2={turn:0,tilt:0,flip:false,tap:false};
+// Swap decoder state only during each synchronous BLE callback to keep sensor histories isolated.
+const freshDecoder=input=>({IN:input,buf:[],boot:[],booted:false,t0:0,grav:null,bias:[0,0,0],nS:0,still:0,flipT:0,armed:true,lastTap:0,raw:'',BTN:{mode:'unknown',last:-1,run:0,longest:0,seen:0,pressed:false,candidate:false,since:0,pressedAt:0},MOTION:{lastAt:0,turnOn:false,tapQuietAt:0}});
+function captureDecoder(){return{IN,buf,boot,booted,t0,grav,bias,nS,still,flipT,armed,lastTap,raw,BTN,MOTION}}
+function restoreDecoder(s){IN=s.IN;buf=s.buf;boot=s.boot;booted=s.booted;t0=s.t0;grav=s.grav;bias=s.bias;nS=s.nS;still=s.still;flipT=s.flipT;armed=s.armed;lastTap=s.lastTap;raw=s.raw;BTN=s.BTN;MOTION=s.MOTION}
+const decoderStates=[captureDecoder(),freshDecoder(IN2)];let activeDecoder=0;
+function withDecoder(index,run){if(index===activeDecoder)return run();const previous=activeDecoder;decoderStates[previous]=captureDecoder();restoreDecoder(decoderStates[index]);activeDecoder=index;
+  try{return run()}finally{decoderStates[index]=captureDecoder();activeDecoder=previous;restoreDecoder(decoderStates[previous])}}
+const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],nrm=a=>Math.hypot(a[0],a[1],a[2]),med=a=>a.slice().sort((x,y)=>x-y)[a.length>>1];
+function resetDec(){buf=[];boot=[];booted=false;grav=null;nS=0;still=0;flipT=0;armed=true;lastTap=0;IN.turn=IN.tilt=0;IN.flip=IN.tap=false;Object.assign(MOTION,{lastAt:0,turnOn:false,tapQuietAt:0});Object.assign(BTN,{mode:'unknown',last:-1,run:0,longest:0,seen:0,pressed:false,candidate:false,since:0,pressedAt:0})}
+function filterMotion(twist,tilt,now){
+  const dt=MOTION.lastAt?clamp(now-MOTION.lastAt,.005,.08):.02;MOTION.lastAt=now;
+  const turn=clamp((cfg.inv?twist:-twist)/cfg.twist,-1,1),magnitude=Math.abs(turn);
+  if(!MOTION.turnOn&&magnitude>=.38)MOTION.turnOn=true;else if(MOTION.turnOn&&magnitude<=.2)MOTION.turnOn=false;
+  const targetTurn=MOTION.turnOn?Math.sign(turn)*clamp((magnitude-.2)/.8,0,1):0;
+  IN.turn+=(targetTurn-IN.turn)*(1-Math.exp(-dt/.12));if(!MOTION.turnOn&&Math.abs(IN.turn)<.025)IN.turn=0;
+  const normalizedTilt=clamp((tilt-100)/(cfg.tilt-100),0,1),targetTilt=normalizedTilt<=.08?0:(normalizedTilt-.08)/.92;
+  IN.tilt+=(targetTilt-IN.tilt)*(1-Math.exp(-dt/.1));if(targetTilt===0&&IN.tilt<.015)IN.tilt=0;
+}
+function updateAccelTap(imp,spin,now){
+  if(imp<cfg.tap*.35){if(!MOTION.tapQuietAt)MOTION.tapQuietAt=now;if(now-MOTION.tapQuietAt>=.12)armed=true}else MOTION.tapQuietAt=0;
+  if(imp>=cfg.tap&&spin<650&&armed&&now-lastTap>=.6&&!IN.flip){IN.tap=true;armed=false;lastTap=now;MOTION.tapQuietAt=0}
+}
+function onPkt(dv,controller=0){
+  if(controller!==activeDecoder)return withDecoder(controller,()=>onPkt(dv,controller));
+  raw=Array.from(new Uint8Array(dv.buffer,dv.byteOffset,dv.byteLength),b=>b.toString(16).padStart(2,'0')).join(' ');
+  for(let i=0;i<dv.byteLength;i++)buf.push(dv.getUint8(i));
+  for(;;){
+    let k=-1;for(let i=0;i<buf.length-1;i++)if(buf[i]==0x22&&buf[i+1]<=15){k=i;break}
+    if(k<0){buf=(buf.length&&buf[buf.length-1]==0x22)?[0x22]:[];return}
+    if(k)buf.splice(0,k);
+    if(buf.length<14)return;
+    const f=buf.splice(0,14),v=[];
+    for(let j=2;j<14;j+=2){let x=f[j]|(f[j+1]<<8);if(x>32767)x-=65536;v.push(x)}
+    proc(v,f[1]);
+  }
+}
+function buttonTap(status,now){
+  if(BTN.mode==='counter')return false;
+  if(BTN.mode==='unknown'){
+    if(status>1){BTN.mode='counter';return false}
+    BTN.seen++;BTN.run=status===BTN.last?BTN.run+1:1;BTN.last=status;BTN.longest=Math.max(BTN.longest,BTN.run);
+    if(BTN.seen>=12&&BTN.longest>=4){BTN.mode='button';BTN.pressed=BTN.candidate=status===1;BTN.pressedAt=BTN.pressed?now:0}
+    else if(BTN.seen>=40)BTN.mode='counter';
+    return false;
+  }
+  if(status>1){BTN.mode='counter';return false}
+  const down=status===1;
+  if(down!==BTN.candidate){BTN.candidate=down;BTN.since=now}
+  if(BTN.candidate!==BTN.pressed&&now-BTN.since>=.018){
+    BTN.pressed=BTN.candidate;
+    if(BTN.pressed)BTN.pressedAt=now;
+    else{const duration=now-BTN.pressedAt;BTN.pressedAt=0;return duration>=.025&&duration<=2}
+  }
+  return false;
+}
+function proc(v,status){
+  const now=performance.now()/1000,g=v.slice(0,3),a=v.slice(3),am=nrm(a);nS++;
+  if(am<800||am>8000)return;
+  const physicalTap=buttonTap(status,now);
+  if(!grav){grav=a.slice();bias=g.slice();t0=now}
+  if(!booted){boot.push([g,a]);
+    if(now-t0>=1.2&&boot.length>=5){for(let i=0;i<3;i++){bias[i]=med(boot.map(x=>x[0][i]));grav[i]=med(boot.map(x=>x[1][i]))}booted=true;boot=[];$('#st').textContent='połączone ✓'}
+    return}
+  const dev=Math.abs(am-GRV),al=dev<400?.25:0;for(let i=0;i<3;i++)grav[i]=(1-al)*grav[i]+al*a[i];
+  const gn=nrm(grav),gu=grav.map(x=>x/gn),gc=g.map((x,i)=>x-bias[i]),spin=nrm(gc),twist=dot(gc,gu);
+  const imp=nrm(a.map((x,i)=>x-grav[i])),tilt=Math.sqrt(Math.max(0,GRV*GRV-grav[2]*grav[2]));
+  if(spin<220&&dev<90){if(!still)still=now;if(now-still>=.2)for(let i=0;i<3;i++)bias[i]=.95*bias[i]+.05*g[i]}else still=0;
+  filterMotion(twist,tilt,now);
+  // odwrócenie
+  if(grav[2]>=1200&&dev<90&&spin<400){if(!flipT)flipT=now;IN.flip=now-flipT>=.3}else{flipT=0;IN.flip=false}
+  // stuknięcie
+  if(physicalTap)IN.tap=true;
+  if(BTN.mode==='counter')updateAccelTap(imp,spin,now);
+}
+const NAT=!!(window.Capacitor&&Capacitor.isNativePlatform&&Capacitor.isNativePlatform());
+const APP=NAT?(Capacitor.registerPlugin?Capacitor.registerPlugin('App'):Capacitor.Plugins.App):null;
+const UPDATE_REPO='qir3k/trikkygames';let updateRelease=null,updateBusy=false;
+const CMD=[0x20,0x10,0x00,0xd0,0x07,0x34,0x00,0x03];
+const hex2dv=h=>new DataView(new Uint8Array(((h||'').replace(/[^0-9a-fA-F]/g,'').match(/../g)||[]).map(x=>parseInt(x,16))).buffer);
+let curId=null,curId2=null,dev2=null,pendingDuo=false;
+function hasSecondConnection(){return !!curId2||!!(dev2&&dev2.gatt&&dev2.gatt.connected)}
+function hasConnection(){return !!curId||!!curId2||!!(dev&&dev.gatt&&dev.gatt.connected)||!!(dev2&&dev2.gatt&&dev2.gatt.connected)}
+async function disconnect(){const ids=[curId,curId2].filter(Boolean),webDevices=[dev,dev2];curId=curId2=null;try{if(NAT)await Promise.all(ids.map(deviceId=>Capacitor.Plugins.BluetoothLe.disconnect({deviceId})));else webDevices.forEach(device=>{if(device&&device.gatt&&device.gatt.connected)device.gatt.disconnect()})}catch(e){}disc()}
+const disc=()=>{resetDec();withDecoder(1,resetDec);curId=curId2=null;dev=dev2=null;pendingDuo=false;$('#bc').textContent='Połącz z Triki';$('#bc').onclick=connect;$('#st').textContent='rozłączone';$('#st').classList.remove('on');showWelcome()};
+const devs={};let scanL=null,busy=false;
+const nm=d=>d.name||'(bez nazwy)';
+function renderDevs(){
+  const l=Object.values(devs).filter(d=>d.t&&d.id!==curId&&d.id!==curId2).sort((a,b)=>b.rssi-a.rssi);
+  $('#dl').innerHTML=l.map(d=>`<button class="g device" data-id="${d.id}">Triki <small>${d.id.slice(-8)} · ${d.rssi} dBm</small></button>`).join('');
+  document.querySelectorAll('#dl button').forEach(b=>b.onclick=()=>pick(b.dataset.id));
+}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));let LOG=[];
+const L=m=>{LOG.push(new Date().toLocaleTimeString()+' '+m);try{localStorage.setItem('trikiLog',LOG.join('\n'))}catch{}$('#lg').textContent=LOG.join('\n')};
+try{const pv=localStorage.getItem('trikiLog');if(pv)$('#lg').textContent='[poprzednie uruchomienie]\n'+pv}catch{}
+async function connect(){
+  try{
+    $('#welcome-status').textContent='Wyszukiwanie Triki…';
+    if((curId||dev)&&(curId2||dev2)){ $('#welcome-status').textContent='Połączono już dwa Triki.';return }
+    if(!NAT){await webConnect();return}
+    const B=Capacitor.Plugins.BluetoothLe;
+    $('#st').textContent='przygotowanie…';$('#welcome-status').textContent='Przygotowanie Bluetooth…';
+    await B.initialize({androidNeverForLocation:false});
+    try{const l=await B.isLocationEnabled();if(!l.value)alert('Włącz Lokalizację w ustawieniach telefonu – Android wymaga tego do skanowania Bluetooth.')}catch{}
+    for(const k in devs)delete devs[k];renderDevs();
+    if(!scanL)scanL=await B.addListener('onScanResult',e=>{const d=e.device||{};if(!d.deviceId)return;
+      devs[d.deviceId]={id:d.deviceId,name:e.localName||d.name,rssi:e.rssi,t:/triki/i.test(e.localName||d.name||'')||(e.uuids||[]).some(u=>(u||'').toLowerCase()==NUS)};renderDevs();const message='Skanuję… znaleziono Triki: '+Object.values(devs).filter(d=>d.t).length;$('#st').textContent=message;$('#welcome-status').textContent=message});
+    await B.requestLEScan({allowDuplicates:true});
+    $('#st').textContent='skanuję… wciśnij przycisk na Triki';$('#welcome-status').textContent='Skanuję… wciśnij przycisk na Triki';
+    setTimeout(()=>{B.stopLEScan().catch(()=>{});if(!busy){const message='Koniec skanowania ('+Object.keys(devs).length+'). Kliknij, aby szukać ponownie.';$('#st').textContent=message;$('#welcome-status').textContent=message}},15000);
+  }catch(e){const message='błąd: '+(e.message||JSON.stringify(e));$('#st').textContent=message;$('#welcome-status').textContent=message}
+}
+async function pick(id){
+  const B=Capacitor.Plugins.BluetoothLe,controller=curId?1:0;busy=true;LOG=[];
+  if(controller===1&&curId2){$('#st').textContent='Można połączyć maksymalnie dwa Triki.';busy=false;return}
+  try{await B.stopLEScan()}catch{}
+  try{
+    if(controller===0)resetDec();else withDecoder(1,resetDec);$('#st').textContent='łączę…';L('connect '+id);
+    await B.addListener('disconnected|'+id,()=>disconnect());
+    await B.connect({deviceId:id,timeout:10000});L('connected');
+    await sleep(1200);
+    $('#st').textContent='pobieram usługi…';
+    let S=NUS,TX=TXU,RX=RXU,wnr=false;
+    try{
+      const r=await B.getServices({deviceId:id});
+      const sv=(r.services||[]).find(x=>(x.uuid||'').toLowerCase()==NUS);
+      if(!sv)throw new Error('To urządzenie nie ma usługi Triki (NUS)');
+      const cs=sv.characteristics||[];L('NUS: '+JSON.stringify(cs.map(c=>[(c.uuid||'').slice(0,8),Object.keys(c.properties||{}).filter(k=>c.properties[k]).join('+')])));const f=u=>cs.find(c=>(c.uuid||'').toLowerCase()==u);
+      S=sv.uuid;TX=(f(TXU)||{}).uuid||TXU;const rc=f(RXU)||{};RX=rc.uuid||RXU;
+      const pr=rc.properties||{};wnr=!!pr.writeWithoutResponse&&!pr.write;
+    }catch(e){if(/NUS/.test(e.message))throw e;L('getServices pominięte: '+(e.message||JSON.stringify(e)))}
+    await B.addListener(`notification|${id}|${S}|${TX}`,e=>{try{if(e&&e.value)onPkt(hex2dv(e.value),controller)}catch(x){L('pkt err '+x.message)}});L('listener ok');
+    await sleep(300);
+    await B.startNotifications({deviceId:id,service:S,characteristic:TX});L('notify ok');
+    await sleep(500);
+    try{localStorage.removeItem('trikiW')}catch{}
+    const val=CMD.map(b=>b.toString(16).padStart(2,'0')).join('');
+    const meth='writeWithoutResponse';
+    L('zapis '+val+' metodą '+meth);
+    await B[meth]({deviceId:id,service:S,characteristic:RX,value:val,timeout:5000});L('write ok');
+    if(controller===0)curId=id;else curId2=id;
+    $('#dl').innerHTML='';$('#st').textContent='kalibracja – połóż Triki płasko…';$('#st').classList.add('on');finishConnection(controller);
+  }catch(e){const m=e.message||JSON.stringify(e);L('BŁĄD '+m);$('#st').textContent='błąd: '+m;$('#welcome-status').textContent='Błąd: '+m}
+  busy=false;
+}
+async function webConnect(){
+  const controller=hasConnection()?1:0,device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'Triki'},{services:[NUS]}],optionalServices:[NUS]});
+  if(controller===1&&dev&&device.id===dev.id)throw new Error('Wybierz inne urządzenie Triki.');
+  if(controller===0)dev=device;else dev2=device;
+  device.addEventListener('gattserverdisconnected',()=>disconnect());
+  const sv=await(await device.gatt.connect()).getPrimaryService(NUS);
+  const tx=await sv.getCharacteristic(TXU),rx=await sv.getCharacteristic(RXU);
+  tx.addEventListener('characteristicvaluechanged',e=>onPkt(e.target.value,controller));
+  await tx.startNotifications();
+  try{await rx.writeValue(new Uint8Array(CMD))}catch{await rx.writeValueWithoutResponse(new Uint8Array(CMD))}
+  $('#st').textContent='kalibracja – połóż Triki płasko…';$('#st').classList.add('on');finishConnection(controller);
+}
+if(NAT)document.body.classList.add('nat');
+function compareVersions(a,b){const parts=v=>(v||'').replace(/^v/i,'').split(/[.+-]/).slice(0,3).map(n=>parseInt(n,10)||0),x=parts(a),y=parts(b);for(let i=0;i<3;i++)if(x[i]!==y[i])return x[i]-y[i];return 0}
+async function checkUpdates(){
+  if(updateBusy)return;updateBusy=true;$('#bu').disabled=true;$('#upmsg').textContent='Sprawdzam dostępne wersje…';
+  try{
+    const response=await fetch(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`,{headers:{Accept:'application/vnd.github+json'}});
+    if(!response.ok)throw new Error(response.status===404?'Brak opublikowanej wersji.':'Nie udało się sprawdzić GitHub Releases.');
+    const release=await response.json(),apk=(release.assets||[]).find(a=>a.name.toLowerCase().endsWith('.apk'));
+    if(!apk)throw new Error('W najnowszym wydaniu nie ma pliku APK.');
+    const current=document.querySelector('meta[name="app-version"]').content;
+    if(compareVersions(release.tag_name,current)<=0){updateRelease=null;$('#upmsg').textContent=`Masz aktualną wersję ${current}.`;$('#bu').textContent='↻ Sprawdź aktualizacje';return}
+    updateRelease={tag:release.tag_name,version:release.tag_name.replace(/^v/i,''),url:apk.browser_download_url};
+    $('#upmsg').textContent=`Dostępna jest wersja ${updateRelease.version}.`;
+    $('#bu').textContent=NAT?'↓ Pobierz i zainstaluj':'↗ Pobierz APK';
+  }catch(e){updateRelease=null;$('#upmsg').textContent=e.message||'Nie udało się sprawdzić aktualizacji.';$('#bu').textContent='↻ Sprawdź ponownie'}
+  finally{updateBusy=false;$('#bu').disabled=false}
+}
+async function installUpdate(){
+  if(!updateRelease)return checkUpdates();
+  if(!NAT){window.open(updateRelease.url,'_blank','noopener');return}
+  updateBusy=true;$('#bu').disabled=true;$('#upmsg').textContent=`Pobieram wersję ${updateRelease.version}…`;
+  try{
+    const file=await Capacitor.Plugins.Filesystem.getUri({path:`triki-${updateRelease.version}.apk`,directory:'CACHE'});
+    await Capacitor.Plugins.FileTransfer.downloadFile({url:updateRelease.url,path:file.uri});
+    await Capacitor.Plugins.FileOpener.open({filePath:file.uri,contentType:'application/vnd.android.package-archive',openWithDefault:true});
+    $('#upmsg').textContent='Potwierdź instalację w systemowym oknie Androida.';
+  }catch(e){$('#upmsg').textContent=e.message||'Nie udało się otworzyć instalatora. Zezwól aplikacji na instalowanie APK.'}
+  finally{updateBusy=false;$('#bu').disabled=false}
+}
+$('#bu').onclick=()=>updateRelease?installUpdate():checkUpdates();
+$('#bc').onclick=connect;
+/* ---------- Wejście (Triki + klawiatura) ---------- */
+const KB={l:0,r:0,u:0,d:0,f:0};let kt=0;
+const FRAME_INPUT={turn:0,tilt:0,flip:false,tap:false};
+const FRAME_INPUT2={turn:0,tilt:0,flip:false,tap:false};
+addEventListener('keydown',e=>{const k=e.key;
+  if(k=='ArrowLeft')KB.l=1;if(k=='ArrowRight')KB.r=1;if(k=='ArrowUp')KB.u=1;if(k=='ArrowDown')KB.d=1;if(k=='f'||k=='F')KB.f=1;
+  if(k==' '&&!e.repeat){IN.tap=true;e.preventDefault()}if(k=='Escape'){if(scr==='play'||scr==='over'||scr==='choose')toMenu();else if(scr==='menu')showWelcome()}if(k.startsWith('Arrow'))e.preventDefault();});
+addEventListener('keyup',e=>{const k=e.key;
+  if(k=='ArrowLeft')KB.l=0;if(k=='ArrowRight')KB.r=0;if(k=='ArrowUp')KB.u=0;if(k=='ArrowDown')KB.d=0;if(k=='f'||k=='F')KB.f=0;});
+function inp(dt){kt=clamp(kt+(KB.u-KB.d||-1)*1.4*dt*(KB.u||KB.d?1:.7),0,1);
+  FRAME_INPUT.turn=(KB.r-KB.l)||IN.turn;const targetTilt=Math.max(kt,IN.tilt);FRAME_INPUT.tilt+=(targetTilt-FRAME_INPUT.tilt)*(1-Math.exp(-dt/.1));FRAME_INPUT.flip=!!KB.f||IN.flip;FRAME_INPUT.tap=IN.tap;IN.tap=false;return FRAME_INPUT;}
+function inpSecond(dt){FRAME_INPUT2.turn=IN2.turn;FRAME_INPUT2.tilt+=(IN2.tilt-FRAME_INPUT2.tilt)*(1-Math.exp(-dt/.1));FRAME_INPUT2.flip=IN2.flip;FRAME_INPUT2.tap=IN2.tap;IN2.tap=false;return FRAME_INPUT2}
+/* ---------- Minigry ---------- */
+const adiff=(a,b)=>Math.abs(Math.atan2(Math.sin(a-b),Math.cos(a-b)));
+const TETRIS_SHAPES=[
+ {color:'#48d7c7',cells:[[0,1],[1,1],[2,1],[3,1]]},{color:'#f3ce58',cells:[[1,0],[2,0],[1,1],[2,1]]},
+ {color:'#c38cff',cells:[[1,0],[0,1],[1,1],[2,1]]},{color:'#62a9ff',cells:[[0,0],[0,1],[1,1],[2,1]]},
+ {color:'#ff9e59',cells:[[2,0],[0,1],[1,1],[2,1]]},{color:'#66d680',cells:[[1,0],[2,0],[0,1],[1,1]]},
+ {color:'#ff7184',cells:[[0,0],[1,0],[1,1],[2,1]]}
+];
+const rotateTetromino=cells=>cells.map(([x,y])=>[3-y,x]);
+function fitsTetromino(grid,cells,px,py){return cells.every(([x,y])=>{const gx=px+x,gy=py+y;return gx>=0&&gx<10&&gy<20&&(gy<0||!grid[gy][gx])})}
+function lockTetromino(s){for(const [x,y]of s.piece.cells){const gx=s.x+x,gy=s.y+y;if(gy<0){s.over=true;return} s.grid[gy][gx]=s.piece.color}
+  let cleared=0;s.grid=s.grid.filter(row=>{if(row.every(Boolean)){cleared++;return false}return true});while(s.grid.length<20)s.grid.unshift(Array(10).fill(0));
+  s.lines+=cleared;s.score+=[0,100,300,500,800][cleared]||cleared*250;
+  const shape=TETRIS_SHAPES[Math.random()*TETRIS_SHAPES.length|0];s.piece={cells:shape.cells.map(cell=>cell.slice()),color:shape.color};s.x=3;s.y=0;if(!fitsTetromino(s.grid,s.piece.cells,s.x,s.y))s.over=true;
+}
+const GAMES=[
+{id:'tur',name:'Wieżyczka',desc:'Kręć Triki, żeby celować. Stuknij, żeby strzelić w cel zanim zniknie.',hint:'Kręć = celuj · Stuknij = strzał',
+ init:()=>({a:0,t:[],sp:.5,lives:3,score:0,fl:0}),
+ up(s,dt,i){s.a+=i.turn*4*dt;s.sp-=dt;s.fl-=dt;
+  if(s.sp<=0){s.t.push({a:rnd(0,6.283),l:4-Math.min(1.2,s.score*.025),m:4-Math.min(1.2,s.score*.025)});s.sp=1.1-Math.min(.5,s.score*.02)}
+  s.t.forEach(o=>o.l-=dt);
+  if(i.tap){const h=s.t.findIndex(o=>adiff(o.a,s.a)<.2);if(h>=0){s.t.splice(h,1);s.score++;s.fl=.12}}
+  const n=s.t.length;s.t=s.t.filter(o=>o.l>0);s.lives-=n-s.t.length;return s.lives<=0},
+ dr(s,c){c.strokeStyle='#2e2848';c.lineWidth=2;c.beginPath();c.arc(180,260,130,0,7);c.stroke();
+  s.t.forEach(o=>{c.fillStyle=`hsl(${o.l/o.m*120},90%,60%)`;c.beginPath();c.arc(180+130*Math.cos(o.a),260+130*Math.sin(o.a),8+14*o.l/o.m,0,7);c.fill()});
+  c.strokeStyle=s.fl>0?'#fff':'#ff2bd6';c.lineWidth=6;c.lineCap='round';c.beginPath();c.moveTo(180,260);c.lineTo(180+150*Math.cos(s.a),260+150*Math.sin(s.a));c.stroke();
+  c.fillStyle='#ff2bd6';c.beginPath();c.arc(180,260,14,0,7);c.fill();hud(c,s.score,'♥'.repeat(s.lives))}},
+{id:'bal',name:'Pochył',desc:'Pochylaj Triki, by utrzymać znacznik w ruchomym pasie. Im dłużej, tym węższy pas.',hint:'Pochylenie = wysokość znacznika',
+ init:()=>({p:0,ph:0,c:.5,w:.3,e:1,score:0}),
+ up(s,dt,i){s.ph+=dt*(.8+s.score*.004);s.c=.5+.34*Math.sin(s.ph)*Math.cos(s.ph*.43);s.w=Math.max(.13,.3-s.score*.0012);
+  s.p+=(i.tilt-s.p)*Math.min(1,dt*10);
+  if(Math.abs(s.p-s.c)<s.w/2){s.score+=dt*10;s.e=Math.min(1,s.e+dt*.3)}else s.e-=dt*.45;return s.e<=0},
+ dr(s,c){const y=v=>430-v*340;c.fillStyle='#1f1b2e';c.fillRect(140,80,80,360);
+  c.fillStyle='rgba(61,255,176,.35)';c.fillRect(140,y(s.c+s.w/2),80,s.w*340);
+  c.fillStyle='#ff2bd6';c.beginPath();c.arc(180,y(s.p),16,0,7);c.fill();
+  c.fillStyle='#2e2848';c.fillRect(260,80,14,360);c.fillStyle=s.e>.3?'#3dffb0':'#ff5470';c.fillRect(260,440-360*s.e,14,360*s.e);
+  hud(c,s.score|0,'energia →')}},
+{id:'sla',name:'Slalom',desc:'Kręć Triki, by sterować statkiem w lewo i prawo i unikać spadających bloków.',hint:'Kręć = lewo / prawo',
+ init:()=>({x:180,o:[],sp:0,t:0}),
+ up(s,dt,i){s.t+=dt;s.x=clamp(s.x+i.turn*280*dt,20,340);s.sp-=dt;
+  if(s.sp<=0){s.o.push({x:rnd(10,300),y:-30,w:rnd(35,75)});s.sp=Math.max(.3,.85-s.t*.008)}
+  const v=150+s.t*5;s.o.forEach(o=>o.y+=v*dt);s.o=s.o.filter(o=>o.y<500);
+  return s.o.some(o=>o.y>405&&o.y<445&&s.x>o.x-10&&s.x<o.x+o.w+10)},
+ dr(s,c){c.fillStyle='#ff5470';s.o.forEach(o=>c.fillRect(o.x,o.y,o.w,24));
+  c.fillStyle='#3dffb0';c.beginPath();c.moveTo(s.x,415);c.lineTo(s.x+14,445);c.lineTo(s.x-14,445);c.fill();hud(c,s.t*10|0,'')},
+ score:s=>s.t*10|0},
+{id:'ref',name:'Refleks',desc:'8 rund. Czekaj na sygnał i wykonaj ruch: stuknij, odwróć albo pochyl. Fałstart = 0 pkt.',hint:'Stuknij / Odwróć / Pochyl – zależnie od sygnału',
+ init:()=>({r:0,ph:'w',t:rnd(1,3),cue:0,el:0,score:0,msg:'Czekaj…',pf:0,pt:null}),
+ up(s,dt,i){if(s.pt===null)s.pt=i.tilt>.82;const tiltDown=s.pt?i.tilt>.66:i.tilt>.82;
+  const a={tap:i.tap,flip:i.flip&&!s.pf,tilt:tiltDown&&!s.pt},any=a.tap||a.flip||a.tilt;s.pf=i.flip;s.pt=tiltDown;
+  const res=m=>{s.msg=m;s.ph='r';s.t=1.1};
+  if(s.ph=='w'){s.t-=dt;if(any)res('Za wcześnie! 0 pkt');else if(s.t<=0){s.ph='g';s.cue=['tap','flip','tilt'][rnd(0,3)|0];s.el=0}}
+  else if(s.ph=='g'){s.el+=dt;if(a[s.cue]){const p=Math.round(Math.max(0,1000-s.el*1000)/10);s.score+=p;res((s.el*1000|0)+' ms  +'+p)}
+   else if(any)res('Zły ruch! 0 pkt');else if(s.el>2)res('Za wolno! 0 pkt')}
+  else{s.t-=dt;if(s.t<=0){if(++s.r>=8)return 1;s.ph='w';s.t=rnd(1,3);s.msg='Czekaj…'}}return 0},
+ dr(s,c){const go=s.ph=='g';c.fillStyle=go?'#3dffb0':'#1f1b2e';c.fillRect(30,150,300,180);
+  c.fillStyle=go?'#0d0b14':'#f4f1ff';c.textAlign='center';c.font='bold 38px system-ui';
+  c.fillText(go?{tap:'STUKNIJ!',flip:'ODWRÓĆ!',tilt:'POCHYL!'}[s.cue]:s.msg.split('  ')[0],180,252);
+  if(s.ph=='r'&&s.msg.includes('  ')){c.font='20px system-ui';c.fillText(s.msg.split('  ')[1],180,295)}
+  c.textAlign='left';hud(c,s.score,'runda '+Math.min(8,s.r+1)+'/8')}},
+{id:'cym',name:'Cymbergaj',desc:'Kręć = paletka w bok, pochyl = do przodu. Wbij krążek do bramki rywala, nie wpuść 3 goli.',hint:'Kręć = bok · Pochyl = przód · Stuknij = mocne uderzenie',
+ init:()=>({px:180,py:440,ax:180,ay:70,k:{x:180,y:240,vx:50,vy:130},score:0,score1:0,score2:0,lives:3,sm:0,sm2:0,duo:false}),
+ up(s,dt,i,i2){dt=Math.max(dt,.001);const k=s.k;
+  const nx=clamp(s.px+i.turn*320*dt,26,334),ny=440-i.tilt*140,pvx=(nx-s.px)/dt,pvy=(ny-s.py)/dt;s.px=nx;s.py=ny;
+  const sp=130+(s.duo?s.score1+s.score2:s.score)*12,na=s.duo?clamp(s.ax+i2.turn*320*dt,26,334):s.ax+clamp(clamp(k.x,26,334)-s.ax,-sp*dt,sp*dt),avx=(na-s.ax)/dt;s.ax=na;
+  const topY=s.duo?70+i2.tilt*140:70,topVy=(topY-s.ay)/dt;s.ay=topY;
+  if(i.tap)s.sm=.2;if(i2.tap)s.sm2=.2;s.sm=Math.max(0,s.sm-dt);s.sm2=Math.max(0,s.sm2-dt);
+  const hit=(x,y,vx,vy,b)=>{const dx=k.x-x,dy=k.y-y,d=Math.hypot(dx,dy);if(d<32&&d>0){const ux=dx/d,uy=dy/d;k.x=x+ux*32;k.y=y+uy*32;
+    const vn=k.vx*ux+k.vy*uy;if(vn<0){k.vx-=2*vn*ux;k.vy-=2*vn*uy}k.vx+=vx*.5+ux*b;k.vy+=vy*.5+uy*b;
+    const m=Math.hypot(k.vx,k.vy)||1,t=clamp(m,140,640);k.vx*=t/m;k.vy*=t/m}};
+  k.x+=k.vx*dt;k.y+=k.vy*dt;if(k.x<10||k.x>350){k.x=clamp(k.x,10,350);k.vx*=-1}
+  const gap=k.x>110&&k.x<250;
+  if(k.y<10&&!gap){k.y=10;k.vy=Math.abs(k.vy)}if(k.y>470&&!gap){k.y=470;k.vy=-Math.abs(k.vy)}
+  hit(s.px,s.py,pvx,pvy,s.sm>0?280:0);hit(s.ax,topY,avx,topVy,s.duo&&s.sm2>0?280:0);
+  const rs=direction=>{k.x=180;k.y=240;k.vx=rnd(-60,60);k.vy=130*direction};
+  if(s.duo){if(k.y<-10){s.score1++;rs(-1)}if(k.y>490){s.score2++;rs(1)}return s.score1>=5||s.score2>=5}
+  if(k.y<-10){s.score++;rs(1)}if(k.y>490){s.lives--;rs(1)}return s.lives<=0},
+ dr(s,c){c.strokeStyle='#2e2848';c.lineWidth=2;c.beginPath();c.moveTo(0,240);c.lineTo(360,240);c.stroke();c.beginPath();c.arc(180,240,40,0,7);c.stroke();
+  c.fillStyle='#3dffb0';c.fillRect(110,0,140,5);c.fillStyle='#ff5470';c.fillRect(110,475,140,5);
+  c.fillStyle=s.duo?'#62a9ff':'#9a93b8';c.beginPath();c.arc(s.ax,s.ay,22,0,7);c.fill();
+  c.fillStyle=s.sm>0?'#fff':'#ff2bd6';c.beginPath();c.arc(s.px,s.py,22,0,7);c.fill();
+  c.fillStyle='#f4f1ff';c.beginPath();c.arc(s.k.x,s.k.y,10,0,7);c.fill();if(s.duo)hud(c,`P1 ${s.score1} : ${s.score2} P2`,'do 5');else hud(c,s.score,'♥'.repeat(s.lives))},
+ score:s=>s.duo?Math.max(s.score1,s.score2):s.score},
+{id:'kosz',name:'Kosz',desc:'Kręć = kąt rzutu, stuknij = rzut. Piłka odbija się od obręczy i tablicy.',hint:'Kręć = kąt · Stuknij = rzut',
+ init:()=>({ang:.9,ph:0,b:null,tm:45,score:0,hx:270,hy:200,msg:0,v:470}),
+ up(s,dt,i){s.tm-=dt;s.ph+=dt*2.2;s.msg-=dt;s.ang=clamp(s.ang-i.turn*1.2*dt,.35,1.4);
+  const pw=(Math.sin(s.ph)+1)/2,v=320+pw*300;
+  if(!s.b&&i.tap)s.b={x:60,y:430,x0:60,y0:430,vx:v*Math.cos(s.ang),vy:-v*Math.sin(s.ang),t:0};
+  const b=s.b;if(b){const px=b.x,py=b.y;b.t+=dt;b.x=b.x0+b.vx*b.t;b.y=b.y0+b.vy*b.t+250*b.t*b.t;
+   if(py<s.hy&&b.y>=s.hy){const f=(s.hy-py)/(b.y-py),crossX=px+(b.x-px)*f;
+    if(Math.abs(crossX-s.hx)<14){s.score++;s.msg=.8;s.hx=rnd(190,300);s.hy=rnd(150,260);s.b=null}
+    else if(Math.abs(crossX-s.hx)<35){b.x0=crossX;b.y0=s.hy-10;b.vx+=(crossX<s.hx?-75:75);b.vy=-(b.vy+500*b.t)*.42;b.t=0}}
+   if(s.b===b&&b.vx>0){const boardX=s.hx+21;if(px<boardX&&b.x>=boardX){const f=(boardX-px)/(b.x-px),crossY=py+(b.y-py)*f;
+     if(crossY>s.hy-65&&crossY<s.hy+5){b.x0=boardX;b.y0=crossY;b.vx=-Math.abs(b.vx)*.48;b.vy=b.vy+500*b.t;b.t=0}}}
+   if(s.b===b&&(b.y>500||b.x>390||b.x<-30))s.b=null}
+  s.v=v;return s.tm<=0},
+ dr(s,c){const sh=s.hx,hy=s.hy;c.fillStyle='#ff8a3d';c.fillRect(sh-24,hy-3,48,5);c.fillStyle='#f4f1e9';c.fillRect(sh+32,hy-60,6,65);
+  c.strokeStyle='#9aab9e';c.lineWidth=1;for(let k=-20;k<=20;k+=10){c.beginPath();c.moveTo(sh+k,hy+2);c.lineTo(sh+k*.6,hy+28);c.stroke()}
+  c.fillStyle='#28352c';c.fillRect(0,440,360,40);
+  if(!s.b){c.strokeStyle='rgba(255,191,105,.7)';c.lineWidth=2;c.setLineDash([5,6]);c.beginPath();let started=false;
+   for(let t=.04;t<2;t+=.04){const x=60+s.v*Math.cos(s.ang)*t,y=430-s.v*Math.sin(s.ang)*t+250*t*t;if(x>360||y>440)break;if(!started){c.moveTo(x,y);started=true}else c.lineTo(x,y)}c.stroke();c.setLineDash([])}
+  const b=s.b||{x:60,y:430};c.fillStyle='#ff8a3d';c.beginPath();c.arc(b.x,b.y,11,0,7);c.fill();
+  if(s.msg>0){c.fillStyle='#3dffb0';c.font='bold 40px system-ui';c.textAlign='center';c.fillText('KOSZ! +1',180,120);c.textAlign='left'}
+  hud(c,s.score,Math.ceil(s.tm)+' s')}},
+{id:'dart',name:'Dart',desc:'Ustaw kąt i moc, a potem rzuć. Trafiaj bliżej środka tarczy.',hint:'Kręć = kąt · Pochyl = moc · Stuknij = rzut',
+ init:()=>({ang:1.02,power:.58,speed:514,dart:null,shots:8,score:0,rest:0,marks:[],msg:''}),
+ up(s,dt,i){s.ang=clamp(s.ang-i.turn*.9*dt,.3,1.38);s.power=Math.max(.18,i.tilt);s.rest=Math.max(0,s.rest-dt);
+  if(!s.dart&&s.rest<=0&&s.shots>0&&i.tap){s.shots--;s.speed=380+s.power*230;s.dart={x:50,y:390,vx:s.speed*Math.cos(s.ang),vy:-s.speed*Math.sin(s.ang),t:0}}
+  const d=s.dart;if(d){d.t+=dt;d.x=50+d.vx*d.t;d.y=390+d.vy*d.t+250*d.t*d.t;
+   if(d.x>=300){const t=250/d.vx,y=390+d.vy*t+250*t*t,dist=Math.abs(y-230),pts=dist<8?50:dist<18?30:dist<38?20:dist<58?10:dist<82?5:0;
+    s.score+=pts;s.msg=pts?`+${pts}`:'Pudło';s.marks.push({y:clamp(y,148,312),pts});d.x=300;d.y=clamp(y,148,312);s.dart=null;s.rest=.45}
+   else if(d.y>430||d.t>2){s.msg='Pudło';s.dart=null;s.rest=.45}}
+  return s.shots===0&&!s.dart&&s.rest<=0},
+ dr(s,c){const cx=300,cy=230;c.fillStyle='#25322b';c.beginPath();c.arc(cx,cy,84,0,7);c.fill();
+  for(const [r,col]of[[68,'#d66e54'],[48,'#25322b'],[29,'#d66e54'],[12,'#25322b']]){c.strokeStyle=col;c.lineWidth=r===68||r===29?12:2;c.beginPath();c.arc(cx,cy,r,0,7);c.stroke()}
+  c.strokeStyle='#e9eee4';c.lineWidth=2;c.beginPath();c.moveTo(cx,140);c.lineTo(cx,320);c.stroke();
+  s.marks.forEach((m,k)=>{c.strokeStyle='#ffbf69';c.lineWidth=3;c.beginPath();c.moveTo(cx-12+(k%3)*4,m.y+8);c.lineTo(cx,m.y);c.stroke()});
+  if(!s.dart&&s.shots>0){c.strokeStyle='rgba(255,191,105,.65)';c.lineWidth=2;c.setLineDash([4,6]);c.beginPath();c.moveTo(50,390);
+   for(let t=.08;t<1.8;t+=.08){const x=50+s.speed*Math.cos(s.ang)*t,y=390-s.speed*Math.sin(s.ang)*t+250*t*t;if(x>=300){const hitT=250/(s.speed*Math.cos(s.ang));c.lineTo(300,390-s.speed*Math.sin(s.ang)*hitT+250*hitT*hitT);break}if(y>430)break;c.lineTo(x,y)}c.stroke();c.setLineDash([])}
+  const d=s.dart||{x:50,y:390};c.fillStyle='#ffbf69';c.beginPath();c.arc(d.x,d.y,6,0,7);c.fill();c.fillStyle='#f3f5e9';c.font='bold 18px system-ui';c.textAlign='center';c.fillText(s.msg,180,100);c.textAlign='left';hud(c,s.score,'rzuty '+s.shots)}},
+{id:'wieza',name:'Wieża',desc:'Wspinaj się po platformach. Ląduj i skacz wyżej, zanim spadniesz.',hint:'Kręć = lewo / prawo · Stuknij = skok',
+ init:()=>({p:{x:180,y:78,vy:0,grounded:true},cam:0,plats:[{x:120,y:60,w:120}],maxY:78,score:0,tapWas:false}),
+ up(s,dt,i){const p=s.p;p.x=clamp(p.x+i.turn*220*dt,14,346);if(i.tap&&!s.tapWas&&p.grounded){p.vy=540;p.grounded=false}s.tapWas=i.tap;
+  if(!p.grounded){const oldBottom=p.y-16;p.vy-=950*dt;p.y+=p.vy*dt;const newBottom=p.y-16;
+   if(p.vy<0)for(const o of s.plats)if(oldBottom>=o.y&&newBottom<=o.y&&p.x>o.x-15&&p.x<o.x+o.w+15){p.y=o.y+16;p.vy=0;p.grounded=true;break}}
+  s.maxY=Math.max(s.maxY,p.y);s.score=Math.max(s.score,Math.floor(s.maxY-78));s.cam=Math.max(s.cam,p.y-300);
+  let top=s.plats[s.plats.length-1];while(top.y<s.cam+700){top={x:rnd(25,270),y:top.y+rnd(88,116),w:rnd(62,92)};s.plats.push(top)}
+  s.plats=s.plats.filter(o=>o.y>s.cam-90);return p.y<s.cam-100},
+ dr(s,c){c.fillStyle='#17241f';s.plats.forEach(o=>{const y=430-(o.y-s.cam);c.fillStyle='#c8f36b';c.fillRect(o.x,y,o.w,8);c.fillStyle='#344338';c.fillRect(o.x+5,y+8,o.w-10,5)});
+  const p=s.p,y=430-(p.y-s.cam);c.fillStyle='#ff6670';c.fillRect(p.x-10,y-20,20,28);c.fillStyle='#f3f5e9';c.beginPath();c.arc(p.x,y-24,8,0,7);c.fill();hud(c,s.score,'wysokość')}} ,
+{id:'biegacz',name:'Biegacz',desc:'Zmieniaj pasy, przeskakuj przeszkody i ślizgaj się pod belkami.',hint:'Kręć = pas · Stuknij = skok · Odwróć = ślizg',
+ init:()=>({lane:1,x:180,dir:0,jump:0,obs:[],spawn:.6,time:0,score:0,coins:0}),
+ up(s,dt,i){s.time+=dt;s.score=Math.floor(s.time*10+s.coins*25);const d=i.turn>.55?1:i.turn<-.55?-1:0;if(d&&!s.dir)s.lane=clamp(s.lane+d,0,2);s.dir=d;
+  s.x+=(80+s.lane*100-s.x)*Math.min(1,dt*12);if(i.tap&&s.jump<=0)s.jump=.62;s.jump=Math.max(0,s.jump-dt);s.spawn-=dt;
+  if(s.spawn<=0){const roll=Math.random();s.obs.push({lane:rnd(0,3)|0,y:-30,type:roll<.2?'coin':roll<.62?'jump':'slide'});s.spawn=Math.max(.48,.95-s.time*.006)}
+  const speed=205+Math.min(100,s.time*2);let hit=false;s.obs.forEach(o=>{o.y+=speed*dt;if(o.y>370&&o.y<415&&o.lane===s.lane){if(o.type==='coin'&&!o.collected){s.coins++;o.collected=true}else if(o.type==='jump'&&s.jump>.15){}else if(o.type==='slide'&&i.flip){}else if(o.type!=='coin')hit=true}});
+  s.obs=s.obs.filter(o=>o.y<450);return hit},
+ dr(s,c){c.fillStyle='#18211e';c.beginPath();c.moveTo(70,90);c.lineTo(290,90);c.lineTo(355,460);c.lineTo(5,460);c.closePath();c.fill();
+  c.strokeStyle='#718078';c.lineWidth=2;for(const x of[130,230]){c.beginPath();c.moveTo(180+(x-180)*.25,90);c.lineTo(x,460);c.stroke()}
+  s.obs.forEach(o=>{const x=80+o.lane*100;c.fillStyle=o.type==='coin'?'#ffbf69':o.type==='jump'?'#ff6670':'#62a9ff';if(o.type==='coin'){c.beginPath();c.arc(x,o.y,9,0,7);c.fill()}else c.fillRect(x-24,o.y-12,48,24)});
+  const lift=s.jump>0?Math.sin((.62-s.jump)/.62*Math.PI)*58:0,py=397-lift;c.fillStyle='#ff6670';c.fillRect(s.x-13,py-23,26,30);c.fillStyle='#f3f5e9';c.beginPath();c.arc(s.x,py-29,8,0,7);c.fill();hud(c,s.score,'')},
+ score:s=>s.score},
+{id:'moto',name:'Motocross',desc:'Rozpędź motocykl, wybij się na rampie i ląduj na dwóch kołach. Rób obroty w powietrzu.',hint:'Pochyl = gaz · Kręć / odwróć = obrót w powietrzu',
+ init:()=>({distance:0,speed:130,rampAt:480,y:0,vy:0,air:false,angle:0,tricks:0,crashed:false}),
+ up(s,dt,i){s.speed=115+i.tilt*110;s.distance+=s.speed*dt;
+  if(!s.air&&s.distance>=s.rampAt){s.air=true;s.vy=400;s.rampAt+=720+rnd(0,180)}
+  if(s.air){s.y+=s.vy*dt;s.vy-=650*dt;s.angle+=(i.turn*2.5+(i.flip?5.2:0))*dt;
+   if(s.y<=0&&s.vy<0){const landing=Math.atan2(Math.sin(s.angle),Math.cos(s.angle));if(Math.abs(landing)>1.35){s.crashed=true;return true}
+    if(Math.abs(s.angle)>5.5)s.tricks++;s.y=0;s.vy=0;s.air=false;s.angle=0}}
+  return false},
+ dr(s,c){c.fillStyle='#26342b';c.fillRect(0,382,360,98);c.strokeStyle='#a2b1a4';c.lineWidth=3;c.beginPath();c.moveTo(0,382);c.lineTo(360,382);c.stroke();
+  for(let x=-(s.distance*1.4%90);x<360;x+=90){c.fillStyle='#718078';c.fillRect(x,405,42,3)}
+  const rampX=220+(s.rampAt-s.distance)*.18;if(rampX<360&&rampX>0){c.fillStyle='#ffbf69';c.beginPath();c.moveTo(rampX,382);c.lineTo(rampX+48,382);c.lineTo(rampX+48,368);c.closePath();c.fill()}
+  c.save();c.translate(105,365-s.y);c.rotate(s.angle);c.strokeStyle='#f3f5e9';c.lineWidth=4;c.beginPath();c.moveTo(-25,5);c.lineTo(22,5);c.lineTo(12,-14);c.lineTo(-9,-14);c.closePath();c.stroke();
+  c.fillStyle='#ff6670';c.fillRect(-10,-20,24,8);c.fillStyle='#17211c';for(const x of[-20,20]){c.beginPath();c.arc(x,9,10,0,7);c.fill();c.strokeStyle='#f3f5e9';c.stroke()}
+  c.fillStyle='#f3f5e9';c.beginPath();c.arc(0,-31,8,0,7);c.fill();c.restore();hud(c,Math.floor(s.distance),'triki '+s.tricks)},
+ score:s=>Math.floor(s.distance)+s.tricks*200},
+{id:'tetris',name:'Tetris',desc:'Układaj klocki i czyść linie. Pochylaj, żeby przyspieszyć spadanie.',hint:'Kręć = lewo / prawo · Stuknij = obrót · Odwróć = zrzut',
+ init:()=>{const shape=TETRIS_SHAPES[Math.random()*TETRIS_SHAPES.length|0];return{grid:Array.from({length:20},()=>Array(10).fill(0)),piece:{cells:shape.cells.map(cell=>cell.slice()),color:shape.color},x:3,y:0,score:0,lines:0,drop:0,move:0,dir:0,tap:false,flip:false,over:false}},
+ up(s,dt,i){if(s.over)return true;const dir=i.turn>.55?1:i.turn<-.55?-1:0;s.move-=dt;
+  if(dir){if(s.move<=0){if(fitsTetromino(s.grid,s.piece.cells,s.x+dir,s.y))s.x+=dir;s.move=s.dir===dir?.11:.2}}else s.move=0;s.dir=dir;
+  if(i.tap&&!s.tap){const rotated=rotateTetromino(s.piece.cells);for(const shift of[0,-1,1,-2,2])if(fitsTetromino(s.grid,rotated,s.x+shift,s.y)){s.piece.cells=rotated;s.x+=shift;break}}s.tap=i.tap;
+  if(i.flip&&!s.flip){while(fitsTetromino(s.grid,s.piece.cells,s.x,s.y+1))s.y++;lockTetromino(s);s.drop=0}s.flip=i.flip;if(s.over)return true;
+  s.drop+=dt;const period=i.tilt>.75?.07:Math.max(.13,.58-s.lines*.025);if(s.drop>=period){s.drop-=period;if(fitsTetromino(s.grid,s.piece.cells,s.x,s.y+1))s.y++;else lockTetromino(s)}return s.over},
+ dr(s,c){const ox=90,oy=78,cell=18;c.fillStyle='#17211c';c.fillRect(ox-2,oy-2,cell*10+4,cell*20+4);
+  for(let y=0;y<20;y++)for(let x=0;x<10;x++){c.fillStyle=s.grid[y][x]||'#202c26';c.fillRect(ox+x*cell+1,oy+y*cell+1,cell-2,cell-2)}
+  s.piece.cells.forEach(([x,y])=>{c.fillStyle=s.piece.color;c.fillRect(ox+(s.x+x)*cell+1,oy+(s.y+y)*cell+1,cell-2,cell-2)});hud(c,s.score,'linie '+s.lines)},
+ score:s=>s.score},
+];
+function hud(c,sc,x){c.fillStyle='#f4f1ff';c.font='bold 22px system-ui';c.textAlign='left';c.fillText(sc,14,32);c.textAlign='right';c.fillStyle='#ff2bd6';c.fillText(x,346,32);c.textAlign='left'}
+/* ---------- Rekordy, menu, pętla ---------- */
+let best={};try{best=JSON.parse(localStorage.getItem('trikiBest')||'{}')}catch{}
+const save=()=>{try{localStorage.setItem('trikiBest',JSON.stringify(best))}catch{}};
+$('#rs').onclick=()=>{best={};save();drawMenu()};
+let scr='welcome',sel=0,G=null,S=null,sc=0,newRec=false,lock=0,dir=0,overSel=0,overDir=0;
+let gameMode='solo',hotseatScores=[],playerNo=1,chosenGame=0;
+const cv=$('#cv'),c=cv.getContext('2d',{alpha:false,desynchronized:true});
+function showWelcome(){scr='welcome';document.body.classList.remove('playing');document.body.classList.add('welcome');$('details').hidden=true;$('#menu').style.display='none';$('#game-options').hidden=true;$('#game-title').hidden=true;cv.style.display='none';$('#bm').hidden=true;$('#over-actions').hidden=true;$('#welcome-connect').textContent=hasConnection()?'Przejdź do menu':'Wyszukaj Triki';$('#welcome-status').textContent=hasConnection()?'Połączono z Triki ✓':'Niepołączone';$('#dl').innerHTML=''}
+function enterMenu(){if(!hasConnection()){showWelcome();return}const two=hasSecondConnection();scr='menu';document.body.classList.remove('welcome');$('details').hidden=false;$('#game-options').hidden=true;$('#bc').textContent=two?'Rozłącz Triki':'Dodaj drugie Triki';$('#bc').onclick=two?disconnect:connect;$('#st').textContent=two?'połączono 2 Triki ✓':'połączone ✓';$('#st').classList.add('on');$('#menu').style.display='';drawMenu()}
+function finishConnection(controller){if(controller===1&&pendingDuo){pendingDuo=false;start(chosenGame,'duo')}else enterMenu()}
+function drawMenu(){$('#menu').innerHTML=GAMES.map((g,k)=>`<div class="card ${k==sel?'sel':''}" data-k="${k}"><b>${g.name}</b><span class="badges"><span class="badge">1 Triki</span><span class="badge">Hot seat</span>${g.id==='cym'?'<span class="badge">2 Triki</span>':''}</span><small>${g.desc}</small><em>Rekord: ${best[g.id]||0}</em></div>`).join('');
+  document.querySelectorAll('.card').forEach(e=>e.onclick=()=>chooseGame(+e.dataset.k));
+  $('#hint').textContent='Kręć Triki, aby wybrać grę · stuknij, aby wybrać tryb'}
+function chooseGame(k){chosenGame=k;sel=k;scr='choose';$('details').hidden=true;$('#menu').style.display='none';$('#game-options').hidden=false;$('#game-options-title').textContent=GAMES[k].name;$('#duo-mode').hidden=GAMES[k].id!=='cym'}
+function start(k,mode='solo',nextPlayer=1){sel=k;G=GAMES[k];S=G.init();S.duo=mode==='duo';gameMode=mode;playerNo=nextPlayer;if(nextPlayer===1)hotseatScores=[];sc=0;newRec=false;scr='play';lock=.5;document.body.classList.add('playing');$('details').hidden=true;$('#menu').style.display='none';$('#game-options').hidden=true;$('#game-title').textContent=G.name+(mode==='hotseat'?' · Gracz '+playerNo:mode==='duo'?' · 2 Triki':'');$('#game-title').hidden=false;cv.style.display='block';$('#bm').hidden=false;$('#over-actions').hidden=true;$('#hint').textContent=mode==='duo'?'Czerwony: Triki 1 · Niebieski: Triki 2 · Kręć = ruch · Pochyl = przód':G.hint}
+function toMenu(){scr='menu';document.body.classList.remove('playing');$('details').hidden=false;cv.style.display='none';$('#game-title').hidden=true;$('#game-options').hidden=true;$('#menu').style.display='';$('#bm').hidden=true;$('#over-actions').hidden=true;drawMenu()}
+function retryGame(){if(gameMode==='hotseat'&&playerNo===1)start(sel,'hotseat',2);else if(gameMode==='hotseat')start(sel,'hotseat',1);else start(sel,gameMode)}
+$('#bm').onclick=toMenu;
+$('#retry').onclick=retryGame;$('#leave').onclick=toMenu;
+$('#solo-mode').onclick=()=>start(chosenGame,'solo');$('#hotseat-mode').onclick=()=>start(chosenGame,'hotseat');$('#duo-mode').onclick=()=>{if(curId2)start(chosenGame,'duo');else{pendingDuo=true;connect()}};$('#options-back').onclick=toMenu;
+function drawOverSelection(){document.querySelectorAll('#over-actions button').forEach((button,index)=>{button.classList.toggle('sel',index===overSel);button.setAttribute('aria-pressed',String(index===overSel))})}
+function over(){scr='over';lock=.8;overSel=0;overDir=0;drawOverSelection();$('#over-actions').hidden=false;sc=G.score?G.score(S):S.score|0;if(gameMode==='hotseat')hotseatScores[playerNo-1]=sc;if(sc>(best[G.id]||0)){best[G.id]=sc;newRec=true;save()}
+  $('#retry').textContent=gameMode==='hotseat'&&playerNo===1?'Gracz 2 · start':gameMode==='hotseat'?'Rewanż':'Jeszcze raz'}
+let last=performance.now(),diagAt=last,diagFrames=0,diagFps=0;
+function updateDiagnostics(now){
+  diagFrames++;const elapsed=now-diagAt;if(elapsed<500)return;
+  diagFps=Math.round(diagFrames*1000/elapsed);diagFrames=0;diagAt=now;
+  if(!$('details').open)return;
+  $('#dbg').textContent=`FPS ${diagFps} | turn ${IN.turn.toFixed(2)} tilt ${IN.tilt.toFixed(2)} flip ${+IN.flip} button ${BTN.mode} | próbki: ${nS}${booted?'':' (kalibracja…)'} | pakiet: ${raw}`;
+}
+function loop(now){const dt=Math.min(.05,(now-last)/1000);last=now;updateDiagnostics(now);const i=inp(dt),i2=inpSecond(dt);lock-=dt;
+  if(scr=='menu'){const d=i.turn>.6?1:i.turn<-.6?-1:0;if(d&&!dir){sel=(sel+d+GAMES.length)%GAMES.length;drawMenu()}dir=d;if(i.tap)chooseGame(sel)}
+  else if(scr==='play'||scr==='over'){c.fillStyle='#0d0b14';c.fillRect(0,0,360,480);
+    if(scr=='play'){if(lock<=0&&G.up(S,dt,i,i2))over()}
+    G.dr(S,c);
+    if(scr=='over'){const d=i.turn>.6?1:i.turn<-.6?-1:0;if(d&&!overDir){overSel=(overSel+d+2)%2;drawOverSelection()}overDir=d;
+      if(i.tap){if(overSel===0)retryGame();else toMenu()}
+      if(scr==='over'){c.fillStyle='rgba(13,11,20,.82)';c.fillRect(0,0,360,480);c.textAlign='center';c.fillStyle='#f4f1ff';c.font='bold 34px system-ui';c.fillText(gameMode==='hotseat'&&playerNo===1?'Kolej Gracza 2':'Koniec gry',180,190);
+      c.font='bold 50px system-ui';c.fillStyle='#ff2bd6';c.fillText(sc,180,260);c.font='18px system-ui';c.fillStyle='#3dffb0';c.fillText(newRec?'Nowy rekord!':'Rekord: '+best[G.id],180,295);
+      if(gameMode==='hotseat'&&playerNo===2){const a=hotseatScores[0]||0,b=hotseatScores[1]||0;c.fillStyle='#f3f5e9';c.fillText(`Gracz 1: ${a}  ·  Gracz 2: ${b}`,180,330);c.fillStyle='#c8f36b';c.fillText(a===b?'Remis':a>b?'Wygrywa Gracz 1':'Wygrywa Gracz 2',180,356)}
+      if(gameMode==='duo'){const a=S.score1,b=S.score2;c.fillStyle='#f3f5e9';c.fillText(`Gracz 1: ${a}  ·  Gracz 2: ${b}`,180,330);c.fillStyle='#c8f36b';c.fillText(a===b?'Remis':a>b?'Wygrywa Gracz 1':'Wygrywa Gracz 2',180,356)}
+      c.fillStyle='#9a93b8';c.fillText('Obrót: wybór · stuknięcie: zatwierdź',180,390);c.textAlign='left';}}}
+  requestAnimationFrame(loop)}
+for(const [id,f]of[['s1',v=>cfg.twist=13000/v],['s2',v=>cfg.tilt=5000/v],['s3',v=>cfg.tap=1900/v]])$('#'+id).oninput=e=>f(+e.target.value);
+$('#inv').onchange=e=>cfg.inv=e.target.checked;
+$('#welcome-connect').onclick=()=>hasConnection()?enterMenu():connect();
+if(APP){const app=APP;
+  app.addListener('backButton',()=>{if(scr==='play'||scr==='over'||scr==='choose')toMenu();else if(scr==='menu')showWelcome();else app.minimizeApp()});
+  app.addListener('appStateChange',state=>{if(!state.isActive)disconnect()});
+}
+addEventListener('pagehide',()=>{[dev,dev2].forEach(device=>{if(device&&device.gatt&&device.gatt.connected)device.gatt.disconnect()});if(NAT)[curId,curId2].filter(Boolean).forEach(deviceId=>Capacitor.Plugins.BluetoothLe.disconnect({deviceId}).catch(()=>{}))});
+showWelcome();requestAnimationFrame(loop);

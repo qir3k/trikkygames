@@ -3,3 +3,6 @@ node_modules/
 *.keystore
 debug.keystore
 klucz_base64.txt
+*.keystore
+*.jks
+klucz_base64.txt

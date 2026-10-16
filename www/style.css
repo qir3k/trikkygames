@@ -54,6 +54,50 @@ h1 span {
   margin-bottom: 4px;
 }
 
+#welcome {
+  display: none;
+  width: min(520px, 100%);
+  margin: auto 0;
+  padding: 24px 0;
+  text-align: center;
+}
+
+body.welcome #welcome {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+}
+
+body.welcome > .bar,
+body.welcome > #upmsg,
+body.welcome > #menu,
+body.welcome > #game-options,
+body.welcome > #game-title,
+body.welcome > #cv,
+body.welcome > #over-actions,
+body.welcome > #hint,
+body.welcome > details {
+  display: none;
+}
+
+#welcome h2 {
+  margin: 0;
+  font-size: 24px;
+}
+
+#welcome p {
+  margin: 0;
+  color: var(--muted);
+}
+
+#dl:empty {
+  display: none;
+}
+
+body.welcome > #dl {
+  margin: 0 auto;
+}
+
 button {
   min-height: 42px;
   padding: 10px 14px;
@@ -101,10 +145,6 @@ button.g {
   color: var(--lime);
 }
 
-#bm {
-  display: none;
-}
-
 #upmsg {
   width: min(520px, 100%);
   min-height: 20px;
@@ -138,8 +178,29 @@ details {
   gap: 9px;
 }
 
+#game-options {
+  width: min(520px, 100%);
+  margin: auto 0;
+  text-align: center;
+}
+
+#game-options h2 {
+  margin: 8px 0 16px;
+  font-size: 22px;
+}
+
+.mode-options {
+  display: grid;
+  gap: 9px;
+  margin-bottom: 12px;
+}
+
+.mode-options button {
+  width: 100%;
+}
+
 .card {
-  min-height: 116px;
+  min-height: 150px;
   padding: 14px;
   border: 1px solid #ffffff12;
   border-radius: 8px;
@@ -173,6 +234,23 @@ details {
   font-weight: 700;
 }
 
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 8px 0;
+}
+
+.badge {
+  display: inline-block;
+  padding: 3px 7px;
+  border-radius: 4px;
+  color: var(--fg);
+  background: #38483d;
+  font-size: 10px;
+  font-weight: 700;
+}
+
 #cv {
   display: none;
   width: min(520px, 100%);
@@ -181,6 +259,35 @@ details {
   border-radius: 8px;
   background: #0c110e;
   touch-action: manipulation;
+}
+
+#game-title {
+  width: min(520px, 100%);
+  margin: 4px 0 8px;
+  color: var(--lime);
+  font-size: 22px;
+  text-align: center;
+}
+
+body.playing #bc,
+body.playing #bu,
+body.playing #st,
+body.playing #upmsg,
+body.playing #dl {
+  display: none;
+}
+
+body.playing #game-options {
+  display: none;
+}
+
+body.playing > h1 {
+  display: none;
+}
+
+#over-actions button.sel {
+  outline: 3px solid var(--lime);
+  outline-offset: 2px;
 }
 
 .over-actions {
@@ -257,7 +364,7 @@ input[type='checkbox'] {
   }
 
   .card {
-    min-height: 122px;
+    min-height: 158px;
     padding: 11px;
   }
 
