@@ -1,22 +1,21 @@
-const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e',RXU='6e400002-b5a3-f393-e0a9-e50e24dcca9e',TXU='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e',RXU='6e400002-b5a3-f393-e0a9-e50e24dcca9e',TXU='6e400003-b5a3-f393-e0a9-e50e24dcca9e',LEDU='6e400004-b5a3-f393-e0a9-e50e24dcca9e';
 const $=s=>document.querySelector(s),clamp=(x,a,b)=>Math.max(a,Math.min(b,x)),rnd=(a,b)=>a+Math.random()*(b-a);
 const cfg={twist:2600,tilt:1000,tap:380,inv:false};
 let IN={turn:0,tilt:0,flip:false,tap:false};
 /* ---------- Triki: Bluetooth + dekodowanie ruchu ---------- */
 /* dekoder i wykrywanie gestów oparte na sprawdzonym silniku TRIKI-Control */
 const GRV=2050;let buf=[],boot=[],booted=false,t0=0,grav=null,bias=[0,0,0],nS=0,still=0,flipT=0,armed=true,lastTap=0,raw='',dev=null,off=null;
-let BTN={mode:'unknown',last:-1,run:0,longest:0,seen:0,pressed:false,candidate:false,since:0,pressedAt:0};
-let MOTION={lastAt:0,turnOn:false,tapQuietAt:0};
+let MOTION={lastAt:0,turnOn:false};
 const IN2={turn:0,tilt:0,flip:false,tap:false};
 // Swap decoder state only during each synchronous BLE callback to keep sensor histories isolated.
-const freshDecoder=input=>({IN:input,buf:[],boot:[],booted:false,t0:0,grav:null,bias:[0,0,0],nS:0,still:0,flipT:0,armed:true,lastTap:0,raw:'',BTN:{mode:'unknown',last:-1,run:0,longest:0,seen:0,pressed:false,candidate:false,since:0,pressedAt:0},MOTION:{lastAt:0,turnOn:false,tapQuietAt:0}});
-function captureDecoder(){return{IN,buf,boot,booted,t0,grav,bias,nS,still,flipT,armed,lastTap,raw,BTN,MOTION}}
-function restoreDecoder(s){IN=s.IN;buf=s.buf;boot=s.boot;booted=s.booted;t0=s.t0;grav=s.grav;bias=s.bias;nS=s.nS;still=s.still;flipT=s.flipT;armed=s.armed;lastTap=s.lastTap;raw=s.raw;BTN=s.BTN;MOTION=s.MOTION}
+const freshDecoder=input=>({IN:input,buf:[],boot:[],booted:false,t0:0,grav:null,bias:[0,0,0],nS:0,still:0,flipT:0,armed:true,lastTap:0,raw:'',MOTION:{lastAt:0,turnOn:false}});
+function captureDecoder(){return{IN,buf,boot,booted,t0,grav,bias,nS,still,flipT,armed,lastTap,raw,MOTION}}
+function restoreDecoder(s){IN=s.IN;buf=s.buf;boot=s.boot;booted=s.booted;t0=s.t0;grav=s.grav;bias=s.bias;nS=s.nS;still=s.still;flipT=s.flipT;armed=s.armed;lastTap=s.lastTap;raw=s.raw;MOTION=s.MOTION}
 const decoderStates=[captureDecoder(),freshDecoder(IN2)];let activeDecoder=0;
 function withDecoder(index,run){if(index===activeDecoder)return run();const previous=activeDecoder;decoderStates[previous]=captureDecoder();restoreDecoder(decoderStates[index]);activeDecoder=index;
   try{return run()}finally{decoderStates[index]=captureDecoder();activeDecoder=previous;restoreDecoder(decoderStates[previous])}}
 const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],nrm=a=>Math.hypot(a[0],a[1],a[2]),med=a=>a.slice().sort((x,y)=>x-y)[a.length>>1];
-function resetDec(){buf=[];boot=[];booted=false;grav=null;nS=0;still=0;flipT=0;armed=true;lastTap=0;IN.turn=IN.tilt=0;IN.flip=IN.tap=false;Object.assign(MOTION,{lastAt:0,turnOn:false,tapQuietAt:0});Object.assign(BTN,{mode:'unknown',last:-1,run:0,longest:0,seen:0,pressed:false,candidate:false,since:0,pressedAt:0})}
+function resetDec(){buf=[];boot=[];booted=false;grav=null;nS=0;still=0;flipT=0;armed=true;lastTap=0;IN.turn=IN.tilt=0;IN.flip=IN.tap=false;Object.assign(MOTION,{lastAt:0,turnOn:false})}
 function filterMotion(twist,tilt,now){
   const dt=MOTION.lastAt?clamp(now-MOTION.lastAt,.005,.08):.02;MOTION.lastAt=now;
   const turn=clamp((cfg.inv?twist:-twist)/cfg.twist,-1,1),magnitude=Math.abs(turn);
@@ -26,9 +25,10 @@ function filterMotion(twist,tilt,now){
   const normalizedTilt=clamp((tilt-100)/(cfg.tilt-100),0,1),targetTilt=normalizedTilt<=.08?0:(normalizedTilt-.08)/.92;
   IN.tilt+=(targetTilt-IN.tilt)*(1-Math.exp(-dt/.1));if(targetTilt===0&&IN.tilt<.015)IN.tilt=0;
 }
-function updateAccelTap(imp,spin,now){
-  if(imp<cfg.tap*.35){if(!MOTION.tapQuietAt)MOTION.tapQuietAt=now;if(now-MOTION.tapQuietAt>=.12)armed=true}else MOTION.tapQuietAt=0;
-  if(imp>=cfg.tap&&spin<650&&armed&&now-lastTap>=.6&&!IN.flip){IN.tap=true;armed=false;lastTap=now;MOTION.tapQuietAt=0}
+function updateAccelTap(verticalImpact,spin,tilt,now){
+  if(verticalImpact<cfg.tap*.5)armed=true;
+  if(verticalImpact>=cfg.tap&&tilt<550&&spin<800&&armed&&now-lastTap>=.45&&!IN.flip){armed=false;lastTap=now;return true}
+  return false;
 }
 function onPkt(dv,controller=0){
   if(controller!==activeDecoder)return withDecoder(controller,()=>onPkt(dv,controller));
@@ -41,46 +41,25 @@ function onPkt(dv,controller=0){
     if(buf.length<14)return;
     const f=buf.splice(0,14),v=[];
     for(let j=2;j<14;j+=2){let x=f[j]|(f[j+1]<<8);if(x>32767)x-=65536;v.push(x)}
-    proc(v,f[1]);
+    proc(v);
   }
 }
-function buttonTap(status,now){
-  if(BTN.mode==='counter')return false;
-  if(BTN.mode==='unknown'){
-    if(status>1){BTN.mode='counter';return false}
-    BTN.seen++;BTN.run=status===BTN.last?BTN.run+1:1;BTN.last=status;BTN.longest=Math.max(BTN.longest,BTN.run);
-    if(BTN.seen>=12&&BTN.longest>=4){BTN.mode='button';BTN.pressed=BTN.candidate=status===1;BTN.pressedAt=BTN.pressed?now:0}
-    else if(BTN.seen>=40)BTN.mode='counter';
-    return false;
-  }
-  if(status>1){BTN.mode='counter';return false}
-  const down=status===1;
-  if(down!==BTN.candidate){BTN.candidate=down;BTN.since=now}
-  if(BTN.candidate!==BTN.pressed&&now-BTN.since>=.018){
-    BTN.pressed=BTN.candidate;
-    if(BTN.pressed)BTN.pressedAt=now;
-    else{const duration=now-BTN.pressedAt;BTN.pressedAt=0;return duration>=.025&&duration<=2}
-  }
-  return false;
-}
-function proc(v,status){
+function proc(v){
   const now=performance.now()/1000,g=v.slice(0,3),a=v.slice(3),am=nrm(a);nS++;
   if(am<800||am>8000)return;
-  const physicalTap=buttonTap(status,now);
   if(!grav){grav=a.slice();bias=g.slice();t0=now}
   if(!booted){boot.push([g,a]);
     if(now-t0>=1.2&&boot.length>=5){for(let i=0;i<3;i++){bias[i]=med(boot.map(x=>x[0][i]));grav[i]=med(boot.map(x=>x[1][i]))}booted=true;boot=[];$('#st').textContent='połączone ✓'}
     return}
   const dev=Math.abs(am-GRV),al=dev<400?.25:0;for(let i=0;i<3;i++)grav[i]=(1-al)*grav[i]+al*a[i];
   const gn=nrm(grav),gu=grav.map(x=>x/gn),gc=g.map((x,i)=>x-bias[i]),spin=nrm(gc),twist=dot(gc,gu);
-  const imp=nrm(a.map((x,i)=>x-grav[i])),tilt=Math.sqrt(Math.max(0,GRV*GRV-grav[2]*grav[2]));
+  const tilt=Math.sqrt(Math.max(0,GRV*GRV-grav[2]*grav[2]));
   if(spin<220&&dev<90){if(!still)still=now;if(now-still>=.2)for(let i=0;i<3;i++)bias[i]=.95*bias[i]+.05*g[i]}else still=0;
   filterMotion(twist,tilt,now);
   // odwrócenie
   if(grav[2]>=1200&&dev<90&&spin<400){if(!flipT)flipT=now;IN.flip=now-flipT>=.3}else{flipT=0;IN.flip=false}
-  // stuknięcie
-  if(physicalTap)IN.tap=true;
-  if(BTN.mode==='counter')updateAccelTap(imp,spin,now);
+  const verticalImpact=Math.abs(dot(a.map((x,i)=>x-grav[i]),gu));
+  if(updateAccelTap(verticalImpact,spin,tilt,now)){IN.tap=true;pulseLed(activeDecoder)}
 }
 const NAT=!!(window.Capacitor&&Capacitor.isNativePlatform&&Capacitor.isNativePlatform());
 const APP=NAT?(Capacitor.registerPlugin?Capacitor.registerPlugin('App'):Capacitor.Plugins.App):null;
@@ -88,10 +67,31 @@ const UPDATE_REPO='qir3k/trikkygames';let updateRelease=null,updateBusy=false;
 const CMD=[0x20,0x10,0x00,0xd0,0x07,0x34,0x00,0x03];
 const hex2dv=h=>new DataView(new Uint8Array(((h||'').replace(/[^0-9a-fA-F]/g,'').match(/../g)||[]).map(x=>parseInt(x,16))).buffer);
 let curId=null,curId2=null,dev2=null,pendingDuo=false;
+const ledChars=[null,null],ledIds=[null,null],ledTimers=[0,0],ledWrites=[Promise.resolve(),Promise.resolve()];
+function writeLed(controller,on){
+  ledWrites[controller]=ledWrites[controller].then(async()=>{
+    if(NAT){
+      const deviceId=ledIds[controller];if(!deviceId)return;
+      await Capacitor.Plugins.BluetoothLe.write({deviceId,service:NUS,characteristic:LEDU,value:on?'01':'00',timeout:3000});
+    }else{
+      const characteristic=ledChars[controller];if(!characteristic)return;
+      await characteristic.writeValue(new Uint8Array([on?1:0]));
+    }
+  }).catch(e=>L(`LED ${on?'on':'off'} err ${e.message||e}`));
+  return ledWrites[controller];
+}
+function pulseLed(controller){
+  writeLed(controller,true);
+  clearTimeout(ledTimers[controller]);
+  ledTimers[controller]=setTimeout(()=>writeLed(controller,false),160);
+}
 function hasSecondConnection(){return !!curId2||!!(dev2&&dev2.gatt&&dev2.gatt.connected)}
 function hasConnection(){return !!curId||!!curId2||!!(dev&&dev.gatt&&dev.gatt.connected)||!!(dev2&&dev2.gatt&&dev2.gatt.connected)}
-async function disconnect(){const ids=[curId,curId2].filter(Boolean),webDevices=[dev,dev2];curId=curId2=null;try{if(NAT)await Promise.all(ids.map(deviceId=>Capacitor.Plugins.BluetoothLe.disconnect({deviceId})));else webDevices.forEach(device=>{if(device&&device.gatt&&device.gatt.connected)device.gatt.disconnect()})}catch(e){}disc()}
-const disc=()=>{resetDec();withDecoder(1,resetDec);curId=curId2=null;dev=dev2=null;pendingDuo=false;$('#bc').textContent='Połącz z Triki';$('#bc').onclick=connect;$('#st').textContent='rozłączone';$('#st').classList.remove('on');showWelcome()};
+async function disconnect(fromEvent=false){
+  if(!fromEvent){for(let i=0;i<2;i++){clearTimeout(ledTimers[i]);ledTimers[i]=0}await Promise.all([writeLed(0,false),writeLed(1,false)])}
+  const ids=[curId,curId2].filter(Boolean),webDevices=[dev,dev2];curId=curId2=null;try{if(NAT)await Promise.all(ids.map(deviceId=>Capacitor.Plugins.BluetoothLe.disconnect({deviceId})));else webDevices.forEach(device=>{if(device&&device.gatt&&device.gatt.connected)device.gatt.disconnect()})}catch(e){}disc()
+}
+const disc=()=>{resetDec();withDecoder(1,resetDec);for(let i=0;i<2;i++){clearTimeout(ledTimers[i]);ledTimers[i]=0;ledChars[i]=ledIds[i]=null}curId=curId2=null;dev=dev2=null;pendingDuo=false;$('#bc').textContent='Połącz z Triki';$('#bc').onclick=connect;$('#st').textContent='rozłączone';$('#st').classList.remove('on');showWelcome()};
 const devs={};let scanL=null,busy=false;
 const nm=d=>d.name||'(bez nazwy)';
 function renderDevs(){
@@ -125,8 +125,8 @@ async function pick(id){
   try{await B.stopLEScan()}catch{}
   try{
     if(controller===0)resetDec();else withDecoder(1,resetDec);$('#st').textContent='łączę…';L('connect '+id);
-    await B.addListener('disconnected|'+id,()=>disconnect());
-    await B.connect({deviceId:id,timeout:10000});L('connected');
+    await B.addListener('disconnected|'+id,()=>disconnect(true));
+    await B.connect({deviceId:id,timeout:10000});ledIds[controller]=id;L('connected');
     await sleep(1200);
     $('#st').textContent='pobieram usługi…';
     let S=NUS,TX=TXU,RX=RXU,wnr=false;
@@ -136,6 +136,7 @@ async function pick(id){
       if(!sv)throw new Error('To urządzenie nie ma usługi Triki (NUS)');
       const cs=sv.characteristics||[];L('NUS: '+JSON.stringify(cs.map(c=>[(c.uuid||'').slice(0,8),Object.keys(c.properties||{}).filter(k=>c.properties[k]).join('+')])));const f=u=>cs.find(c=>(c.uuid||'').toLowerCase()==u);
       S=sv.uuid;TX=(f(TXU)||{}).uuid||TXU;const rc=f(RXU)||{};RX=rc.uuid||RXU;
+      if(!f(LEDU))L('LED characteristic not listed');
       const pr=rc.properties||{};wnr=!!pr.writeWithoutResponse&&!pr.write;
     }catch(e){if(/NUS/.test(e.message))throw e;L('getServices pominięte: '+(e.message||JSON.stringify(e)))}
     await B.addListener(`notification|${id}|${S}|${TX}`,e=>{try{if(e&&e.value)onPkt(hex2dv(e.value),controller)}catch(x){L('pkt err '+x.message)}});L('listener ok');
@@ -149,16 +150,17 @@ async function pick(id){
     await B[meth]({deviceId:id,service:S,characteristic:RX,value:val,timeout:5000});L('write ok');
     if(controller===0)curId=id;else curId2=id;
     $('#dl').innerHTML='';$('#st').textContent='kalibracja – połóż Triki płasko…';$('#st').classList.add('on');finishConnection(controller);
-  }catch(e){const m=e.message||JSON.stringify(e);L('BŁĄD '+m);$('#st').textContent='błąd: '+m;$('#welcome-status').textContent='Błąd: '+m}
+  }catch(e){ledIds[controller]=null;const m=e.message||JSON.stringify(e);L('BŁĄD '+m);$('#st').textContent='błąd: '+m;$('#welcome-status').textContent='Błąd: '+m}
   busy=false;
 }
 async function webConnect(){
   const controller=hasConnection()?1:0,device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'Triki'},{services:[NUS]}],optionalServices:[NUS]});
   if(controller===1&&dev&&device.id===dev.id)throw new Error('Wybierz inne urządzenie Triki.');
   if(controller===0)dev=device;else dev2=device;
-  device.addEventListener('gattserverdisconnected',()=>disconnect());
+  device.addEventListener('gattserverdisconnected',()=>disconnect(true));
   const sv=await(await device.gatt.connect()).getPrimaryService(NUS);
   const tx=await sv.getCharacteristic(TXU),rx=await sv.getCharacteristic(RXU);
+  try{ledChars[controller]=await sv.getCharacteristic(LEDU)}catch(e){ledChars[controller]=null;L('LED characteristic unavailable: '+(e.message||e))}
   tx.addEventListener('characteristicvaluechanged',e=>onPkt(e.target.value,controller));
   await tx.startNotifications();
   try{await rx.writeValue(new Uint8Array(CMD))}catch{await rx.writeValueWithoutResponse(new Uint8Array(CMD))}
@@ -405,7 +407,7 @@ function updateDiagnostics(now){
   diagFrames++;const elapsed=now-diagAt;if(elapsed<500)return;
   diagFps=Math.round(diagFrames*1000/elapsed);diagFrames=0;diagAt=now;
   if(!$('details').open)return;
-  $('#dbg').textContent=`FPS ${diagFps} | turn ${IN.turn.toFixed(2)} tilt ${IN.tilt.toFixed(2)} flip ${+IN.flip} button ${BTN.mode} | próbki: ${nS}${booted?'':' (kalibracja…)'} | pakiet: ${raw}`;
+  $('#dbg').textContent=`FPS ${diagFps} | turn ${IN.turn.toFixed(2)} tilt ${IN.tilt.toFixed(2)} flip ${+IN.flip} tap ${armed?'uzbrojony':'czekam'} | próbki: ${nS}${booted?'':' (kalibracja…)'} | pakiet: ${raw}`;
 }
 function loop(now){const dt=Math.min(.05,(now-last)/1000);last=now;updateDiagnostics(now);const i=inp(dt),i2=inpSecond(dt);lock-=dt;
   if(scr=='menu'){const d=i.turn>.6?1:i.turn<-.6?-1:0;if(d&&!dir){sel=(sel+d+GAMES.length)%GAMES.length;drawMenu()}dir=d;if(i.tap)chooseGame(sel)}
